@@ -100,8 +100,12 @@ impl AuthManager {
         sessions.retain(|_, exp| *exp > now);
     }
 
-    async fn is_rate_limited(&self, _: &str) -> bool {
-        let key = "login";
+    async fn is_rate_limited(&self, username: &str) -> bool {
+        let key = if username == self.username {
+            "login"
+        } else {
+            "unknown"
+        };
         let attempts = self.attempts.read().await;
         let Some(state) = attempts.get(key) else {
             return false;
@@ -112,10 +116,14 @@ impl AuthManager {
         blocked_until > Utc::now()
     }
 
-    async fn register_failed_attempt(&self, _: &str) {
-        // One aggregate bucket bounds retained state and prevents name rotation
-        // from bypassing the admission limit.
-        let key = "login";
+    async fn register_failed_attempt(&self, username: &str) {
+        // Keep the single configured administrator's bucket separate from
+        // failures under arbitrary usernames, without creating per-name state.
+        let key = if username == self.username {
+            "login"
+        } else {
+            "unknown"
+        };
         let mut attempts = self.attempts.write().await;
         let state = attempts.entry(key.to_string()).or_insert(AttemptState {
             fail_count: 0,
@@ -129,8 +137,11 @@ impl AuthManager {
         }
     }
 
-    async fn clear_attempts(&self, _: &str) {
+    async fn clear_attempts(&self, username: &str) {
         // Successful login does not reset failures from other callers.
+        if username == self.username {
+            self.attempts.write().await.remove("login");
+        }
     }
 }
 
@@ -179,6 +190,18 @@ mod tests {
         }
         assert_eq!(mgr.attempts.read().await.len(), 1);
         assert!(mgr.is_rate_limited("another").await);
+    }
+    #[tokio::test]
+    async fn unknown_names_do_not_block_the_configured_administrator_bucket() {
+        let mgr = AuthManager::new(AuthConfig {
+            username: "admin".into(),
+            ..Default::default()
+        });
+        for _ in 0..5 {
+            let unknown_name = uuid::Uuid::new_v4().to_string();
+            mgr.register_failed_attempt(&unknown_name).await;
+        }
+        assert!(!mgr.is_rate_limited("admin").await);
     }
     #[tokio::test(flavor = "current_thread")]
     async fn blocking_verification_does_not_occupy_async_worker() {
