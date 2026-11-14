@@ -28,3 +28,8 @@ reqwest.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 bcrypt.workspace = true
+
+[dev-dependencies]
+beacon-store = { path = "../beacon-store", features = ["test-seams"] }
+sqlx-core = { workspace = true }
+sqlx-postgres = { workspace = true }

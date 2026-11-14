@@ -26,6 +26,8 @@ pub struct ServerConfig {
     pub https_port: u16,
     #[serde(default = "default_admin_port")]
     pub admin_port: u16,
+    #[serde(default = "default_admin_host")]
+    pub admin_host: String,
     #[serde(default = "default_host")]
     pub host: String,
 }
@@ -38,6 +40,9 @@ fn default_https_port() -> u16 {
 }
 fn default_admin_port() -> u16 {
     5900
+}
+fn default_admin_host() -> String {
+    std::net::Ipv4Addr::LOCALHOST.to_string()
 }
 fn default_host() -> String {
     "0.0.0.0".to_string()
@@ -279,6 +284,15 @@ impl BeaconConfig {
             "store.database_url",
         )?;
         validate_url(&config.brain.api_base, &["http", "https"], "brain.api_base")?;
+        let admin_ip: std::net::IpAddr = config
+            .server
+            .admin_host
+            .parse()
+            .map_err(|_| anyhow::anyhow!("server.admin_host must be an IP address"))?;
+        anyhow::ensure!(
+            admin_ip.is_loopback() || config.auth.enabled,
+            "non-loopback server.admin_host requires enabled authentication"
+        );
         if config.auth.enabled {
             anyhow::ensure!(
                 !config.auth.username.trim().is_empty() && !config.auth.password.trim().is_empty(),
@@ -327,12 +341,58 @@ mod config_tests {
         serde_json::json!({"server": {}, "brain": {"api_key": uuid::Uuid::new_v4().to_string(), "api_base": "https://model.example.com", "model": std::env::var("BEACON_TEST_MODEL").unwrap_or_else(|_| uuid::Uuid::new_v4().to_string())}, "dns": {"default_ip": "192.0.2.1"}, "store": {"database_url": "postgresql://db.example.com/beacon"}})
     }
     #[test]
-    fn admin_listener_defaults_are_open_without_explicit_auth() {
+    fn public_listener_defaults_remain_independent_of_local_admin() {
         let host = default_host()
             .parse::<std::net::IpAddr>()
             .expect("configured default host is an IP address");
         assert!(host.is_unspecified());
         assert!(!AuthConfig::default().enabled);
+    }
+
+    #[test]
+    fn admin_bind_defaults_to_loopback_independently_of_public_host() {
+        let config = BeaconConfig::from_json(&valid().to_string()).unwrap();
+        let server = serde_json::to_value(&config.server).unwrap();
+        let admin: std::net::IpAddr = server["admin_host"]
+            .as_str()
+            .expect("independent administrator bind setting")
+            .parse()
+            .unwrap();
+        assert!(admin.is_loopback());
+        assert!(config
+            .server
+            .host
+            .parse::<std::net::IpAddr>()
+            .unwrap()
+            .is_unspecified());
+    }
+    #[test]
+    fn remote_admin_bind_requires_authentication() {
+        for addr in [
+            std::net::Ipv4Addr::UNSPECIFIED.to_string(),
+            std::net::Ipv6Addr::UNSPECIFIED.to_string(),
+            "192.0.2.1".into(),
+        ] {
+            let mut v = valid();
+            v["server"]["admin_host"] = addr.into();
+            assert!(BeaconConfig::from_json(&v.to_string()).is_err());
+            v["auth"] = serde_json::json!({"enabled":true,"username":"admin","password":uuid::Uuid::new_v4().to_string()});
+            assert!(BeaconConfig::from_json(&v.to_string()).is_ok());
+        }
+    }
+    #[test]
+    fn explicit_loopback_admin_binds_allow_local_anonymous_mode() {
+        for addr in [
+            std::net::Ipv4Addr::LOCALHOST.to_string(),
+            std::net::Ipv6Addr::LOCALHOST.to_string(),
+        ] {
+            let mut v = valid();
+            v["server"]["admin_host"] = addr.into();
+            assert!(BeaconConfig::from_json(&v.to_string()).is_ok());
+        }
+        let mut v = valid();
+        v["server"]["admin_host"] = "localhost".into();
+        assert!(BeaconConfig::from_json(&v.to_string()).is_err());
     }
 
     #[test]

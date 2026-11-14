@@ -10,8 +10,38 @@ use beacon_forward::ForwardManager;
 use beacon_http::Router;
 use beacon_store::Store;
 use beacon_tls::TlsManager;
-use rustls::pki_types::PrivateKeyDer;
+use rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer};
 use std::sync::Arc;
+
+/// Serve the existing Axum application over the maintained rustls transport.
+async fn serve_https(
+    listener: tokio::net::TcpListener,
+    acceptor: tokio_rustls::TlsAcceptor,
+    app: axum::Router,
+) -> Result<()> {
+    loop {
+        let (stream, _) = listener.accept().await?;
+        let acceptor = acceptor.clone();
+        let service = hyper_util::service::TowerToHyperService::new(app.clone());
+        tokio::spawn(async move {
+            let Ok(Ok(stream)) =
+                tokio::time::timeout(std::time::Duration::from_secs(10), acceptor.accept(stream))
+                    .await
+            else {
+                tracing::debug!("TLS handshake failed or timed out");
+                return;
+            };
+            let io = hyper_util::rt::TokioIo::new(stream);
+            if hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new())
+                .serve_connection_with_upgrades(io, service)
+                .await
+                .is_err()
+            {
+                tracing::debug!("HTTPS connection ended with an error");
+            }
+        });
+    }
+}
 
 /// SNI cert resolver backed by TlsManager (hot certs) with file-cert fallback.
 struct HotSniResolver {
@@ -23,16 +53,15 @@ impl HotSniResolver {
     /// Parse the file cert into a CertifiedKey once, at startup.
     fn with_fallback(tls: Arc<TlsManager>, cert_path: &str, key_path: &str) -> Self {
         let fb = (|| {
-            let cert_pem = std::fs::read_to_string(cert_path).ok()?;
-            let key_pem = std::fs::read_to_string(key_path).ok()?;
-            let mut chain = Vec::new();
-            for item in rustls_pemfile::certs(&mut cert_pem.as_bytes()) {
-                if let Ok(c) = item {
-                    chain.push(c);
-                }
+            let chain = CertificateDer::pem_file_iter(cert_path)
+                .ok()?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .ok()?;
+            if chain.is_empty() {
+                return None;
             }
-            let key_der = rustls_pemfile::private_key(&mut key_pem.as_bytes()).ok()??;
-            let signer = rustls::crypto::ring::sign::any_supported_type(&key_der).ok()?;
+            let private_der = PrivateKeyDer::from_pem_file(key_path).ok()?;
+            let signer = rustls::crypto::ring::sign::any_supported_type(&private_der).ok()?;
             Some(Arc::new(rustls::sign::CertifiedKey::new(chain, signer)))
         })();
         Self { tls, fallback: fb }
@@ -175,8 +204,8 @@ async fn main() -> Result<()> {
             }
         });
 
-    let admin_addr: std::net::SocketAddr =
-        format!("{}:{}", config.server.host, config.server.admin_port).parse()?;
+    let admin_addr =
+        std::net::SocketAddr::new(config.server.admin_host.parse()?, config.server.admin_port);
     let public_addr: std::net::SocketAddr =
         format!("{}:{}", config.server.host, config.server.http_port).parse()?;
     let https_addr: std::net::SocketAddr =
@@ -213,14 +242,9 @@ async fn main() -> Result<()> {
                 &config.tls.key_pem_path,
             )));
         server_cfg.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-        let rustls_cfg = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(server_cfg));
-
-        let https_srv = async move {
-            axum_server::bind_rustls(https_addr, rustls_cfg)
-                .serve(public_app.into_make_service())
-                .await
-                .map_err(|e| anyhow::anyhow!(e))
-        };
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_cfg));
+        let https_listener = tokio::net::TcpListener::bind(https_addr).await?;
+        let https_srv = serve_https(https_listener, acceptor, public_app);
 
         let redirect_port = config.server.https_port;
         let redirect_app = axum::Router::new()
@@ -330,4 +354,98 @@ fn default_admin_has_no_forward_ui() {
 #[test]
 fn enabled_admin_has_forward_ui() {
     assert!(get_ui_html().contains("/forwards"));
+}
+
+#[tokio::test]
+async fn maintained_tls_transport_serves_http1_and_http2() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let tls = Arc::new(TlsManager::new());
+    tls.generate_self_signed("example.com").await.unwrap();
+    let (chain, _) = tls.get_cert_sync("example.com").unwrap();
+    let trust = reqwest::Certificate::from_der(&chain[0]).unwrap();
+    let mut config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_cert_resolver(Arc::new(HotSniResolver {
+            tls,
+            fallback: None,
+        }));
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = axum::Router::new().route("/", axum::routing::get(|| async { "fixture response" }));
+    let server = tokio::spawn(serve_https(
+        listener,
+        tokio_rustls::TlsAcceptor::from(Arc::new(config)),
+        app,
+    ));
+    for http2 in [false, true] {
+        let builder = reqwest::Client::builder()
+            .no_proxy()
+            .add_root_certificate(trust.clone())
+            .resolve("example.com", addr)
+            .timeout(std::time::Duration::from_secs(3));
+        let client = if http2 {
+            builder.http2_prior_knowledge()
+        } else {
+            builder.http1_only()
+        }
+        .build()
+        .unwrap();
+        let response = client
+            .get(format!("https://example.com:{}/", addr.port()))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.version(),
+            if http2 {
+                reqwest::Version::HTTP_2
+            } else {
+                reqwest::Version::HTTP_11
+            }
+        );
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(response.text().await.unwrap(), "fixture response");
+    }
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test]
+async fn maintained_pem_reader_loads_file_fallback_and_rejects_malformed_chain() {
+    let tls = Arc::new(TlsManager::new());
+    let directory = std::env::temp_dir().join(format!(
+        "beacon-pem-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    tokio::fs::create_dir_all(&directory).await.unwrap();
+    let certificate = directory.join("certificate.pem");
+    let private_file = directory.join("private.pem");
+    tls.ensure_pem_files(
+        certificate.to_str().unwrap(),
+        private_file.to_str().unwrap(),
+        &["example.com".into()],
+    )
+    .await
+    .unwrap();
+    let loaded = HotSniResolver::with_fallback(
+        tls.clone(),
+        certificate.to_str().unwrap(),
+        private_file.to_str().unwrap(),
+    );
+    assert!(loaded.fallback.is_some());
+    tokio::fs::write(&certificate, "[R]").await.unwrap();
+    let malformed = HotSniResolver::with_fallback(
+        tls,
+        certificate.to_str().unwrap(),
+        private_file.to_str().unwrap(),
+    );
+    tokio::fs::remove_dir_all(directory).await.unwrap();
+    assert!(malformed.fallback.is_none());
 }

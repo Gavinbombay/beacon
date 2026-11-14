@@ -8,6 +8,11 @@ use std::sync::Arc;
 use tokio::process::Command;
 use tokio::sync::RwLock;
 
+type Issuance<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<(PathBuf, PathBuf)>> + Send + 'a>>;
+type CertificateBundle = (Vec<CertificateDer<'static>>, Vec<u8>);
+type CertificateMap = HashMap<String, CertificateBundle>;
+
 /// Executes a certificate issuance or renewal request. The lifecycle decides
 /// when to issue and where to install the resulting files.
 pub trait AcmeTransport: Send + Sync {
@@ -16,7 +21,7 @@ pub trait AcmeTransport: Send + Sync {
         tls: &'a TlsConfig,
         dns: &'a DnsConfig,
         domains: &'a [String],
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(PathBuf, PathBuf)>> + Send + 'a>>;
+    ) -> Issuance<'a>;
 }
 
 /// Adapter to the external lego client using the shared capability registry.
@@ -55,8 +60,7 @@ impl AcmeTransport for LegoTransport {
         tls: &'a TlsConfig,
         dns: &'a DnsConfig,
         domains: &'a [String],
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(PathBuf, PathBuf)>> + Send + 'a>>
-    {
+    ) -> Issuance<'a> {
         Box::pin(async move {
             // Validate before creating files or attempting a process.
             let spec = beacon_core::provider::provider_spec(&dns.provider)?;
@@ -89,9 +93,15 @@ impl AcmeTransport for LegoTransport {
 }
 
 pub struct TlsManager {
-    certs: Arc<RwLock<HashMap<String, (Vec<CertificateDer<'static>>, Vec<u8>)>>>,
+    certs: Arc<RwLock<CertificateMap>>,
     /// Sync mirror of `certs` so the sync SNI resolver never touches async.
-    sync_certs: std::sync::RwLock<HashMap<String, (Vec<CertificateDer<'static>>, Vec<u8>)>>,
+    sync_certs: std::sync::RwLock<CertificateMap>,
+}
+
+impl Default for TlsManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TlsManager {

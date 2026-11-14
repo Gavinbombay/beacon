@@ -874,7 +874,7 @@ fn parse_proxy_handler(config: &Value) -> ProxyHandler {
         .unwrap_or_default();
 
     // Longest paths first keeps routing deterministic for overlapping prefixes.
-    path_routes.sort_by(|a, b| b.matcher.path.len().cmp(&a.matcher.path.len()));
+    path_routes.sort_by_key(|a| std::cmp::Reverse(a.matcher.path.len()));
     ProxyHandler {
         default,
         path_routes,
@@ -903,7 +903,7 @@ fn parse_composite_handler(config: &Value) -> CompositeHandler {
         })
         .unwrap_or_default();
 
-    routes.sort_by(|a, b| b.matcher.path.len().cmp(&a.matcher.path.len()));
+    routes.sort_by_key(|a| std::cmp::Reverse(a.matcher.path.len()));
     CompositeHandler { default, routes }
 }
 
@@ -1088,8 +1088,10 @@ mod tests {
 
     #[tokio::test]
     async fn metrics_are_opt_in_and_count_requests() {
-        let mut router = Router::default();
-        router.metrics_enabled = false;
+        let mut router = Router {
+            metrics_enabled: false,
+            ..Router::default()
+        };
         let req = || {
             Request::builder()
                 .uri("/metrics")

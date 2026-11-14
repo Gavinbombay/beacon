@@ -309,16 +309,18 @@ async fn create_site(
     Json(req): Json<CreateSiteRequest>,
 ) -> Json<ApiResponse<Site>> {
     let subdomain = norm_sub(&req.subdomain);
-    match state
-        .store
-        .create_site(
+    match mutate_site(
+        &state.store,
+        &state.http_router,
+        state.store.create_site(
             &req.domain,
             &subdomain,
             &req.handler_type,
             req.handler_config.clone(),
             req.tls_enabled,
-        )
-        .await
+        ),
+    )
+    .await
     {
         Ok(site) => {
             // Hot TLS: mint a per-host cert immediately so the SNI resolver
@@ -338,30 +340,32 @@ async fn create_site(
                 )
                 .await;
             // Hot add: new vhost must route immediately, no restart.
-            refresh_routes(&state.http_router, state.store.list_sites().await);
+            let _ = reload_routes(&state.store, &state.http_router).await;
             Json(ApiResponse::success(site))
         }
         Err(e) => {
             // Idempotent: unique (domain, subdomain) → patch in place.
             let msg = e.to_string();
             if msg.contains("duplicate") || msg.contains("unique") {
-                match state
-                    .store
-                    .update_site(
+                let result = mutate_site(
+                    &state.store,
+                    &state.http_router,
+                    state.store.update_site(
                         &req.domain,
                         &subdomain,
                         Some(&req.handler_type),
                         Some(&req.handler_config),
                         Some(req.tls_enabled),
                         None,
-                    )
-                    .await
-                {
+                    ),
+                )
+                .await;
+                let _ = reload_routes(&state.store, &state.http_router).await;
+                match result {
                     Ok(Some(site)) => {
                         if !req.tls_enabled {
                             state.tls.drop_cert(&site.full_domain()).await;
                         }
-                        refresh_routes(&state.http_router, state.store.list_sites().await);
                         return Json(ApiResponse::success(site));
                     }
                     Ok(None) => return Json(ApiResponse::error("Site not found after conflict")),
@@ -392,18 +396,21 @@ async fn patch_site(
     Json(req): Json<PatchSiteRequest>,
 ) -> Json<ApiResponse<Site>> {
     let subdomain = norm_sub(&subdomain);
-    match state
-        .store
-        .update_site(
+    let result = mutate_site(
+        &state.store,
+        &state.http_router,
+        state.store.update_site(
             &domain,
             &subdomain,
             req.handler_type.as_deref(),
             req.handler_config.as_ref(),
             req.tls_enabled,
             req.status.as_deref(),
-        )
-        .await
-    {
+        ),
+    )
+    .await;
+    let _ = reload_routes(&state.store, &state.http_router).await;
+    match result {
         Ok(Some(site)) => {
             if req.tls_enabled == Some(true) {
                 if let Err(e) = state.tls.generate_self_signed(&site.full_domain()).await {
@@ -412,7 +419,6 @@ async fn patch_site(
             } else if req.tls_enabled == Some(false) {
                 state.tls.drop_cert(&site.full_domain()).await;
             }
-            refresh_routes(&state.http_router, state.store.list_sites().await);
             let _ = state
                 .store
                 .log_audit(
@@ -434,7 +440,14 @@ async fn delete_site(
     Path((domain, subdomain)): Path<(String, String)>,
 ) -> Json<ApiResponse<String>> {
     let subdomain = norm_sub(&subdomain);
-    match state.store.delete_site(&subdomain, &domain).await {
+    let result = mutate_site(
+        &state.store,
+        &state.http_router,
+        state.store.delete_site(&subdomain, &domain),
+    )
+    .await;
+    let _ = reload_routes(&state.store, &state.http_router).await;
+    match result {
         Ok(true) => {
             state.tls.drop_cert(&site_fqdn(&subdomain, &domain)).await;
             let _ = state
@@ -446,7 +459,6 @@ async fn delete_site(
                     serde_json::json!({"subdomain": subdomain, "domain": domain}),
                 )
                 .await;
-            refresh_routes(&state.http_router, state.store.list_sites().await);
             Json(ApiResponse::success("Site deleted".into()))
         }
         Ok(false) => Json(ApiResponse::error("Site not found")),
@@ -472,8 +484,7 @@ async fn deploy_site(
                 )
                 .await;
 
-            let sites = state.store.list_sites().await.unwrap_or_default();
-            state.http_router.update_sites(sites);
+            let _ = reload_routes(&state.store, &state.http_router).await;
 
             Json(ApiResponse::success(DeployResult {
                 site_id: site.id,
@@ -599,20 +610,24 @@ async fn oneshot_deploy(
             "create_site",
             |_attempt| {
                 let store = state.store.clone();
+                let router = state.http_router.clone();
                 let domain = req.domain.clone();
                 let subdomain = req.subdomain.clone();
                 let handler_type = req.handler_type.clone();
                 let handler_config = req.handler_config.clone();
                 async move {
-                    let site = store
-                        .create_site(
+                    let site = mutate_site(
+                        &store,
+                        &router,
+                        store.create_site(
                             &domain,
                             &subdomain,
                             &handler_type,
                             handler_config,
                             req.tls_enabled,
-                        )
-                        .await?;
+                        ),
+                    )
+                    .await?;
                     Ok(site)
                 }
             },
@@ -723,11 +738,7 @@ async fn oneshot_deploy(
             |_attempt| {
                 let store = state.store.clone();
                 let router = state.http_router.clone();
-                async move {
-                    let sites = store.list_sites().await?;
-                    router.update_sites(sites);
-                    Ok(())
-                }
+                async move { reload_routes(&store, &router).await }
             },
         )
         .await
@@ -802,10 +813,13 @@ async fn oneshot_deploy(
             "rollback_delete_site",
             |_attempt| {
                 let store = state.store.clone();
+                let router = state.http_router.clone();
                 let domain = site.domain.clone();
                 let subdomain = site.subdomain.clone();
                 async move {
-                    let deleted = store.delete_site(&subdomain, &domain).await?;
+                    let deleted =
+                        mutate_site(&store, &router, store.delete_site(&subdomain, &domain))
+                            .await?;
                     if !deleted {
                         return Err(anyhow::anyhow!("site delete returned false"));
                     }
@@ -825,11 +839,7 @@ async fn oneshot_deploy(
                     |_attempt| {
                         let store = state.store.clone();
                         let router = state.http_router.clone();
-                        async move {
-                            let sites = store.list_sites().await?;
-                            router.update_sites(sites);
-                            Ok(())
-                        }
+                        async move { reload_routes(&store, &router).await }
                     },
                 )
                 .await;
@@ -1014,8 +1024,31 @@ pub async fn ui_response() -> Response {
     response
 }
 
+/// Withdraw before the first mutation await, under the refresh lock. A cancelled
+/// mutation (including a post-commit reread) must never retain its old snapshot.
+async fn mutate_site<T>(
+    store: &Store,
+    router: &HttpRouter,
+    operation: impl Future<Output = anyhow::Result<T>>,
+) -> anyhow::Result<T> {
+    let _guard = store.lock_site_refresh().await;
+    router.update_sites(Vec::new());
+    operation.await
+}
+
+/// Serialize the authoritative read through publication. Clear before awaiting so
+/// a query error or cancellation cannot leave a withdrawn route cached.
+async fn reload_routes(store: &Store, router: &HttpRouter) -> anyhow::Result<()> {
+    let _guard = store.lock_site_refresh().await;
+    router.update_sites(Vec::new());
+    let sites = store.list_sites().await?;
+    router.update_sites(sites);
+    Ok(())
+}
+
 // A failed authoritative refresh withdraws the cached snapshot. Availability
 // resumes on the next successful refresh; withdrawn content is never retained.
+#[cfg(test)]
 fn refresh_routes<E>(router: &HttpRouter, sites: Result<Vec<Site>, E>) {
     router.update_sites(sites.unwrap_or_default());
 }
@@ -1193,3 +1226,6 @@ mod enabled_forward_ui_test {
         assert!(ui.contains("/forwards"));
     }
 }
+
+#[cfg(test)]
+mod pg_regressions;

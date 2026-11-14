@@ -1,16 +1,60 @@
+#[cfg(all(feature = "test-seams", not(debug_assertions)))]
+compile_error!("test-seams is restricted to debug test builds");
+
 use anyhow::Result;
 use beacon_core::{AuditLog, OperationRecord, Site};
 use chrono::{DateTime, Utc};
-use sqlx::postgres::PgPoolOptions;
-use sqlx::{Pool, Postgres, Row};
+use sqlx_core::{pool::Pool, row::Row};
+use sqlx_postgres::{PgPoolOptions, Postgres};
 use std::time::Duration;
 use uuid::Uuid;
 
 pub struct Store {
     pool: Pool<Postgres>,
+    site_refresh: tokio::sync::Mutex<()>,
+    #[cfg(any(test, feature = "test-seams"))]
+    seam: std::sync::RwLock<Option<std::sync::Arc<dyn TestSeam>>>,
+}
+
+/// Failure and scheduling hooks exist only in explicitly selected test builds.
+#[cfg(any(test, feature = "test-seams"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TestPoint {
+    AfterSiteRead,
+    BeforeSiteReread,
+    BeforeListSites,
+    AfterListSites,
+    AfterSiteDelete,
+}
+
+#[cfg(any(test, feature = "test-seams"))]
+pub trait TestSeam: Send + Sync {
+    fn visit(
+        &self,
+        point: TestPoint,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>>;
 }
 
 impl Store {
+    /// Hold from before loading a site snapshot until after publishing it.
+    pub async fn lock_site_refresh(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.site_refresh.lock().await
+    }
+
+    #[cfg(any(test, feature = "test-seams"))]
+    pub fn set_test_seam(&self, seam: Option<std::sync::Arc<dyn TestSeam>>) {
+        *self.seam.write().expect("test seam lock") = seam;
+    }
+
+    #[cfg(any(test, feature = "test-seams"))]
+    async fn test_visit(&self, point: TestPoint) -> Result<()> {
+        let seam = self.seam.read().expect("test seam lock").clone();
+        if let Some(seam) = seam {
+            seam.visit(point).await?;
+        }
+        Ok(())
+    }
+
     pub async fn connect(database_url: &str) -> Result<Self> {
         let db_url = database_url.to_string();
         let handle = tokio::spawn(async move {
@@ -32,27 +76,32 @@ impl Store {
 
         tokio::time::timeout(
             Duration::from_secs(8),
-            sqlx::query("SELECT 1").execute(&pool),
+            sqlx_core::query::query("SELECT 1").execute(&pool),
         )
         .await
         .map_err(|_| anyhow::anyhow!("database ping timeout after 8s"))?
         .map_err(|e| anyhow::anyhow!("database ping failed: {}", e))?;
 
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            site_refresh: tokio::sync::Mutex::new(()),
+            #[cfg(any(test, feature = "test-seams"))]
+            seam: std::sync::RwLock::new(None),
+        })
     }
 
     pub async fn run_migrations(&self) -> Result<()> {
         let statements = migration_statements();
 
         for stmt in statements {
-            sqlx::query(stmt).execute(&self.pool).await?;
+            sqlx_core::query::query(stmt).execute(&self.pool).await?;
         }
         Ok(())
     }
 
     #[cfg(feature = "game_forward")]
     pub async fn list_forwards(&self) -> Result<Vec<beacon_forward::GameForward>> {
-        let rows = sqlx::query(
+        let rows = sqlx_core::query::query(
             "SELECT id, game_name, public_host, public_port, protocol, target_host, target_port, forward_mode, tunnel_path, owner FROM game_forwards ORDER BY id",
         )
         .fetch_all(&self.pool)
@@ -76,7 +125,7 @@ impl Store {
 
     #[cfg(feature = "game_forward")]
     pub async fn upsert_forward(&self, f: &beacon_forward::GameForward) -> Result<()> {
-        sqlx::query(
+        sqlx_core::query::query(
             r#"INSERT INTO game_forwards (id, game_name, public_host, public_port, protocol, target_host, target_port, forward_mode, tunnel_path, owner)
                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
                ON CONFLICT (id) DO UPDATE SET
@@ -96,7 +145,7 @@ impl Store {
 
     #[cfg(feature = "game_forward")]
     pub async fn delete_forward(&self, id: &str) -> Result<bool> {
-        let res = sqlx::query("DELETE FROM game_forwards WHERE id = $1")
+        let res = sqlx_core::query::query("DELETE FROM game_forwards WHERE id = $1")
             .bind(id)
             .execute(&self.pool)
             .await?;
@@ -104,18 +153,22 @@ impl Store {
     }
 
     pub async fn list_sites(&self) -> Result<Vec<Site>> {
-        let rows = sqlx::query(
+        #[cfg(any(test, feature = "test-seams"))]
+        self.test_visit(TestPoint::BeforeListSites).await?;
+        let rows = sqlx_core::query::query(
             "SELECT id, domain, subdomain, handler_type, handler_config, tls_enabled, status, created_at, updated_at FROM sites ORDER BY created_at DESC",
         )
         .fetch_all(&self.pool)
         .await?;
 
+        #[cfg(any(test, feature = "test-seams"))]
+        self.test_visit(TestPoint::AfterListSites).await?;
         Ok(rows.into_iter().map(map_site).collect())
     }
 
     pub async fn get_site(&self, subdomain: &str, domain: &str) -> Result<Option<Site>> {
         let keys = subdomain_keys(subdomain);
-        let result = sqlx::query(
+        let result = sqlx_core::query::query(
             "SELECT id, domain, subdomain, handler_type, handler_config, tls_enabled, status, created_at, updated_at FROM sites WHERE domain = $1 AND subdomain = ANY($2) ORDER BY CASE subdomain WHEN '' THEN 0 WHEN '@' THEN 1 ELSE 2 END LIMIT 1",
         )
         .bind(domain)
@@ -143,7 +196,7 @@ impl Store {
             );
         }
 
-        sqlx::query(
+        sqlx_core::query::query(
             "INSERT INTO sites (id, domain, subdomain, handler_type, handler_config, tls_enabled, status, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, 'active', $7, $7)",
         )
         .bind(id)
@@ -180,16 +233,16 @@ impl Store {
         status: Option<&str>,
     ) -> Result<Option<Site>> {
         if let Some(site) = self.get_site(subdomain, domain).await? {
-            let ht = handler_type.unwrap_or(&site.handler_type);
-            let hc = handler_config.unwrap_or(&site.handler_config);
-            let te = tls_enabled.unwrap_or(site.tls_enabled);
-            let st = status.unwrap_or(&site.status);
-            sqlx::query(
-                r#"UPDATE sites SET handler_type=$1, handler_config=$2, tls_enabled=$3, status=$4, updated_at=NOW()
+            #[cfg(any(test, feature = "test-seams"))]
+            self.test_visit(TestPoint::AfterSiteRead).await?;
+            sqlx_core::query::query(
+                r#"UPDATE sites SET handler_type=COALESCE($1, handler_type), handler_config=COALESCE($2, handler_config), tls_enabled=COALESCE($3, tls_enabled), status=COALESCE($4, status), updated_at=NOW()
                    WHERE domain=$5 AND subdomain=$6 RETURNING id"#,
             )
-            .bind(ht).bind(hc).bind(te).bind(st).bind(domain).bind(&site.subdomain)
+            .bind(handler_type).bind(handler_config).bind(tls_enabled).bind(status).bind(domain).bind(&site.subdomain)
             .fetch_optional(&self.pool).await?;
+            #[cfg(any(test, feature = "test-seams"))]
+            self.test_visit(TestPoint::BeforeSiteReread).await?;
             return self.get_site(subdomain, domain).await;
         }
         Ok(None)
@@ -197,11 +250,14 @@ impl Store {
 
     pub async fn delete_site(&self, subdomain: &str, domain: &str) -> Result<bool> {
         let keys = subdomain_keys(subdomain);
-        let result = sqlx::query("DELETE FROM sites WHERE domain = $1 AND subdomain = ANY($2)")
-            .bind(domain)
-            .bind(&keys)
-            .execute(&self.pool)
-            .await?;
+        let result =
+            sqlx_core::query::query("DELETE FROM sites WHERE domain = $1 AND subdomain = ANY($2)")
+                .bind(domain)
+                .bind(&keys)
+                .execute(&self.pool)
+                .await?;
+        #[cfg(any(test, feature = "test-seams"))]
+        self.test_visit(TestPoint::AfterSiteDelete).await?;
         Ok(result.rows_affected() > 0)
     }
 
@@ -212,7 +268,7 @@ impl Store {
         entity_id: Option<Uuid>,
         details: serde_json::Value,
     ) -> Result<()> {
-        sqlx::query(
+        sqlx_core::query::query(
             "INSERT INTO audit_log (id, action, entity_type, entity_id, details, created_at) VALUES (gen_random_uuid(), $1, $2, $3, $4, NOW())",
         )
         .bind(action)
@@ -225,7 +281,7 @@ impl Store {
     }
 
     pub async fn list_audit_logs(&self, limit: i64) -> Result<Vec<AuditLog>> {
-        let rows = sqlx::query(
+        let rows = sqlx_core::query::query(
             "SELECT id, action, entity_type, entity_id, details, created_at FROM audit_log ORDER BY created_at DESC LIMIT $1",
         )
         .bind(limit)
@@ -244,7 +300,7 @@ impl Store {
         let empty = serde_json::json!({});
         let status = "planned";
 
-        sqlx::query(
+        sqlx_core::query::query(
             "INSERT INTO operations (id, op_type, status, request, result, error, started_at, updated_at, completed_at) VALUES ($1, $2, $3, $4, $5, NULL, $6, $6, NULL)",
         )
         .bind(id)
@@ -278,7 +334,7 @@ impl Store {
         completed: bool,
     ) -> Result<()> {
         let completed_at: Option<DateTime<Utc>> = if completed { Some(Utc::now()) } else { None };
-        sqlx::query(
+        sqlx_core::query::query(
             "UPDATE operations SET status = $2, result = $3, error = $4, updated_at = NOW(), completed_at = $5 WHERE id = $1",
         )
         .bind(id)
@@ -292,7 +348,7 @@ impl Store {
     }
 
     pub async fn get_operation(&self, id: Uuid) -> Result<Option<OperationRecord>> {
-        let row = sqlx::query(
+        let row = sqlx_core::query::query(
             "SELECT id, op_type, status, request, result, error, started_at, updated_at, completed_at FROM operations WHERE id = $1",
         )
         .bind(id)
@@ -302,7 +358,7 @@ impl Store {
     }
 
     pub async fn list_operations(&self, limit: i64) -> Result<Vec<OperationRecord>> {
-        let rows = sqlx::query(
+        let rows = sqlx_core::query::query(
             "SELECT id, op_type, status, request, result, error, started_at, updated_at, completed_at FROM operations ORDER BY started_at DESC LIMIT $1",
         )
         .bind(limit)
@@ -343,7 +399,7 @@ fn mode_str(m: beacon_forward::ForwardMode) -> &'static str {
     }
 }
 
-fn map_site(row: sqlx::postgres::PgRow) -> Site {
+fn map_site(row: sqlx_postgres::PgRow) -> Site {
     Site {
         id: row.get("id"),
         domain: row.get("domain"),
@@ -357,7 +413,7 @@ fn map_site(row: sqlx::postgres::PgRow) -> Site {
     }
 }
 
-fn map_audit(row: sqlx::postgres::PgRow) -> AuditLog {
+fn map_audit(row: sqlx_postgres::PgRow) -> AuditLog {
     AuditLog {
         id: row.get("id"),
         action: row.get("action"),
@@ -368,7 +424,7 @@ fn map_audit(row: sqlx::postgres::PgRow) -> AuditLog {
     }
 }
 
-fn map_operation(row: sqlx::postgres::PgRow) -> OperationRecord {
+fn map_operation(row: sqlx_postgres::PgRow) -> OperationRecord {
     OperationRecord {
         id: row.get("id"),
         op_type: row.get("op_type"),
