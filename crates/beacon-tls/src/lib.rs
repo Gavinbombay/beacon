@@ -199,6 +199,7 @@ impl TlsManager {
             let cert_meta = tokio::fs::metadata(cert_pem_path).await?;
             let key_meta = tokio::fs::metadata(key_pem_path).await?;
             if cert_meta.len() > 0 && key_meta.len() > 0 {
+                Self::restrict_private_file_permissions(key_pem_path).await?;
                 return Ok(());
             }
         }
@@ -216,12 +217,45 @@ impl TlsManager {
 
         let (cert_pem, key_pem) = self.generate_self_signed_pem(domains)?;
         tokio::fs::write(cert_pem_path, cert_pem).await?;
-        tokio::fs::write(key_pem_path, key_pem).await?;
+        Self::write_private_file(key_pem_path, &key_pem).await?;
         tracing::warn!(
             "Generated self-signed TLS cert at {} and {}",
             cert_pem_path,
             key_pem_path
         );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    async fn restrict_private_file_permissions(path: &str) -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = tokio::fs::metadata(path).await?.permissions();
+        permissions.set_mode(0o600);
+        tokio::fs::set_permissions(path, permissions).await?;
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    async fn restrict_private_file_permissions(_: &str) -> Result<()> {
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    async fn write_private_file(path: &str, private_pem: &str) -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        use tokio::io::AsyncWriteExt;
+        let mut options = tokio::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true).mode(0o600);
+        let mut file = options.open(path).await?;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .await?;
+        file.write_all(private_pem.as_bytes()).await?;
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    async fn write_private_file(path: &str, private_pem: &str) -> Result<()> {
+        tokio::fs::write(path, private_pem).await?;
         Ok(())
     }
 
@@ -613,5 +647,112 @@ mod lifecycle_tests {
             .unwrap()
             .is_some());
         tokio::fs::remove_dir_all(dir).await.unwrap();
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn generated_private_file_excludes_group_and_other_users() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "beacon-tls-permission-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let cert_path = root.join("cert.pem");
+        let path = root.join("private.pem");
+        let manager = TlsManager::new();
+        manager
+            .ensure_pem_files(
+                cert_path.to_str().unwrap(),
+                path.to_str().unwrap(),
+                &["example.test".into()],
+            )
+            .await
+            .unwrap();
+        let mode = tokio::fs::metadata(&path)
+            .await
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "generated private file permissions must be owner-only"
+        );
+        let mut permissions = tokio::fs::metadata(&path).await.unwrap().permissions();
+        permissions.set_mode(0o644);
+        tokio::fs::set_permissions(&path, permissions)
+            .await
+            .unwrap();
+        manager
+            .ensure_pem_files(
+                cert_path.to_str().unwrap(),
+                path.to_str().unwrap(),
+                &["example.test".into()],
+            )
+            .await
+            .unwrap();
+        let mode = tokio::fs::metadata(&path)
+            .await
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "existing private file permissions must be owner-only"
+        );
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn existing_private_file_is_restricted_when_certificate_is_missing() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "beacon-tls-existing-permission-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let cert_path = root.join("cert.pem");
+        let path = root.join("private.pem");
+        let manager = TlsManager::new();
+        manager
+            .ensure_pem_files(
+                cert_path.to_str().unwrap(),
+                path.to_str().unwrap(),
+                &["example.test".into()],
+            )
+            .await
+            .unwrap();
+        let mut permissions = tokio::fs::metadata(&path).await.unwrap().permissions();
+        permissions.set_mode(0o644);
+        tokio::fs::set_permissions(&path, permissions)
+            .await
+            .unwrap();
+        tokio::fs::remove_file(&cert_path).await.unwrap();
+        manager
+            .ensure_pem_files(
+                cert_path.to_str().unwrap(),
+                path.to_str().unwrap(),
+                &["example.test".into()],
+            )
+            .await
+            .unwrap();
+        let mode = tokio::fs::metadata(&path)
+            .await
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "existing private file must be restricted before replacement"
+        );
+        tokio::fs::remove_dir_all(root).await.unwrap();
     }
 }
