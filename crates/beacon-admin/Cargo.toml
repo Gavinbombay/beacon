@@ -1,0 +1,30 @@
+[package]
+license = "Apache-2.0"
+name = "beacon-admin"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = []
+game_forward = ["dep:beacon-forward", "beacon-store/game_forward"]
+
+[dependencies]
+beacon-core = { path = "../beacon-core" }
+beacon-store = { path = "../beacon-store" }
+beacon-forward = { path = "../beacon-forward", optional = true }
+beacon-tls = { path = "../beacon-tls" }
+beacon-brain = { path = "../beacon-brain" }
+beacon-dns = { path = "../beacon-dns" }
+beacon-http = { path = "../beacon-http" }
+
+axum.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+arc-swap.workspace = true
+reqwest.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+bcrypt.workspace = true

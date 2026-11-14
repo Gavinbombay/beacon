@@ -1,0 +1,15 @@
+            <div class="card">
+                <h2>Game Lanes</h2>
+                <div id="lanes-list"><div class="empty">Loading...</div></div>
+                <form id="lane-form" style="display:grid;grid-template-columns:repeat(2,1fr);gap:6px;margin-top:10px;">
+                    <input type="text" id="lane-id" placeholder="id (e.g. example-lane)">
+                    <input type="text" id="lane-game" placeholder="game name">
+                    <input type="number" id="lane-port" placeholder="public port">
+                    <select id="lane-proto"><option value="tcp">tcp</option><option value="udp">udp</option></select>
+                    <input type="text" id="lane-target" placeholder="target host:port">
+                    <select id="lane-mode"><option value="live">live</option><option value="model_only">model_only</option></select>
+                    <button type="button" class="btn btn-secondary" id="lane-add-btn">Add Lane</button>
+                    <button type="button" class="btn btn-secondary" id="lane-refresh-btn">Refresh</button>
+                </form>
+            </div>
+            

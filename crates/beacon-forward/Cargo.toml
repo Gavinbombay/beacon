@@ -1,0 +1,10 @@
+[package]
+license = "Apache-2.0"
+name = "beacon-forward"
+version = "0.2.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+tracing = "0.1"

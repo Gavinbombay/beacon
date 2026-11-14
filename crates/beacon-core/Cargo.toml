@@ -1,0 +1,16 @@
+[package]
+license = "Apache-2.0"
+name = "beacon-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+toml.workspace = true
+tracing.workspace = true
+url = "2"

@@ -1,0 +1,13 @@
+[package]
+license = "Apache-2.0"
+name = "beacon-brain"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+beacon-core = { path = "../beacon-core" }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }

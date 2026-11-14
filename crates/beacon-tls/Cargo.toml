@@ -1,0 +1,18 @@
+[package]
+license = "Apache-2.0"
+name = "beacon-tls"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+beacon-core = { path = "../beacon-core" }
+rustls = { workspace = true }
+tokio = { workspace = true }
+tokio-rustls = { workspace = true }
+rcgen = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+uuid = { workspace = true }
+

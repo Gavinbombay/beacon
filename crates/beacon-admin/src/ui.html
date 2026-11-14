@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Beacon - Web Infrastructure</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0a0a0a; color: #e5e5e5; min-height: 100vh; }
+        .container { max-width: 1200px; margin: 0 auto; padding: 24px; }
+        h1 { color: #f59e0b; margin-bottom: 8px; font-size: 28px; }
+        .subtitle { color: #666; margin-bottom: 32px; }
+        
+        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+        @media (max-width: 768px) { .grid { grid-template-columns: 1fr; } }
+        
+        .card { background: #141414; border: 1px solid #262626; border-radius: 12px; padding: 20px; }
+        .card h2 { color: #f59e0b; font-size: 14px; text-transform: uppercase; margin-bottom: 16px; letter-spacing: 0.5px; }
+        
+        .site-item { display: flex; justify-content: space-between; align-items: center; padding: 12px; background: #1a1a1a; border-radius: 8px; margin-bottom: 8px; }
+        .site-info .domain { font-weight: 600; margin-bottom: 4px; }
+        .site-info .type { color: #666; font-size: 12px; }
+        
+        .btn { padding: 8px 16px; border-radius: 6px; border: none; font-weight: 500; cursor: pointer; font-size: 13px; transition: all 0.15s; }
+        .btn-primary { background: #f59e0b; color: #000; }
+        .btn-primary:hover { background: #d97706; }
+        .btn-danger { background: #dc2626; color: #fff; }
+        .btn-danger:hover { background: #b91c1c; }
+        .btn-sm { padding: 6px 12px; font-size: 12px; }
+        .btn-secondary { background: #334155; color: #e2e8f0; }
+        .btn-secondary:hover { background: #475569; }
+        .btn-row { display: flex; gap: 8px; }
+        
+        .form-group { margin-bottom: 16px; }
+        .form-group label { display: block; margin-bottom: 6px; color: #888; font-size: 12px; }
+        .form-group input, .form-group select { width: 100%; padding: 10px; background: #0a0a0a; border: 1px solid #262626; border-radius: 6px; color: #e5e5e5; font-size: 14px; }
+        .form-group input:focus, .form-group select:focus { outline: none; border-color: #f59e0b; }
+        
+        .chat { background: #0a0a0a; border-radius: 8px; padding: 16px; height: 300px; overflow-y: auto; margin-bottom: 12px; }
+        .msg { padding: 10px 14px; border-radius: 8px; margin-bottom: 8px; max-width: 80%; }
+        .msg-user { background: #f59e0b; color: #000; margin-left: auto; }
+        .msg-ai { background: #1a1a1a; }
+        
+        .status { display: inline-block; padding: 4px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+        .status-active { background: #166534; color: #22c55e; }
+        .status-error { background: #7f1d1d; color: #ef4444; }
+        .status-warn { background: #78350f; color: #fbbf24; }
+        .status-pending { background: #1e293b; color: #93c5fd; }
+
+        .empty { text-align: center; padding: 32px; color: #666; }
+        .ops { max-height: 240px; overflow-y: auto; }
+        .ops-item { padding: 10px; background: #1a1a1a; border-radius: 8px; margin-bottom: 8px; }
+        .ops-top { display: flex; justify-content: space-between; gap: 10px; margin-bottom: 6px; }
+        .ops-meta { font-size: 12px; color: #94a3b8; }
+        .auth-row { display: flex; gap: 8px; align-items: center; margin-bottom: 16px; }
+        .auth-row input { padding: 8px; background: #0a0a0a; border: 1px solid #262626; border-radius: 6px; color: #e5e5e5; }
+        .auth-state { font-size: 12px; color: #94a3b8; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Beacon</h1>
+        <p class="subtitle">AI-powered web infrastructure</p>
+        <div class="auth-row">
+            <input id="auth-user" placeholder="admin user">
+            <input id="auth-pass" type="password" placeholder="password">
+            <button class="btn btn-secondary" id="auth-login-btn">Login</button>
+            <span class="auth-state" id="auth-state">Not authenticated</span>
+        </div>
+        
+        <div class="grid">
+            <div class="card">
+                <h2>Sites</h2>
+                <div id="sites-list"><div class="empty">Loading...</div></div>
+            </div>
+
+            <GAME_CARD>
+            <div class="card">
+                <h2>Add Site</h2>
+                <form id="add-form">
+                    <div class="form-group">
+                        <label>Subdomain</label>
+                        <input type="text" id="subdomain" placeholder="mysite or @ for apex">
+                    </div>
+                    <div class="form-group">
+                        <label>Domain</label>
+                        <input type="text" id="domain" value="example.com">
+                    </div>
+                    <div class="form-group">
+                        <label>Type</label>
+                        <select id="type">
+                            <option value="proxy">Proxy</option>
+                            <option value="static">Static Files</option>
+                            <option value="redirect">Redirect</option>
+                            <option value="composite">Composite</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Target (upstream or path)</label>
+                        <input type="text" id="target" placeholder="[private-ip]:3000 or /var/www/site">
+                    </div>
+                    <div class="btn-row">
+                        <button type="submit" class="btn btn-primary">Create Site</button>
+                        <button type="button" class="btn btn-secondary" id="oneshot-btn">One-Shot Deploy</button>
+                    </div>
+                </form>
+            </div>
+
+            <div class="card" style="grid-column: span 2;">
+                <h2>Operations</h2>
+                <div id="ops-list" class="ops"><div class="empty">No operations yet</div></div>
+            </div>
+            
+            <div class="card" style="grid-column: span 2;">
+                <h2>AI Assistant</h2>
+                <div class="chat" id="chat"></div>
+                <form id="chat-form" style="display:flex;gap:8px;">
+                    <input type="text" id="chat-input" placeholder="Ask Beacon..." style="flex:1;padding:12px;background:#1a1a1a;border:1px solid #262626;border-radius:6px;color:#e5e5e5;">
+                    <button type="submit" class="btn btn-primary">Send</button>
+                </form>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        <SAFE_SCRIPT>
+        const BEACON_TOKEN_KEY = "<TOKEN_STORAGE_KEY>";
+        const BEACON_TOKEN_HEADER = "<TOKEN_HEADER>";
+        const tokenHeaders = () => {
+            const session = localStorage.getItem(BEACON_TOKEN_KEY);
+            return session ? { [BEACON_TOKEN_HEADER]: session } : {};
+        };
+
+        const api = async (path, opts = {}) => {
+            const res = await fetch('/_beacon' + path, { ...opts, headers: { 'Content-Type': 'application/json', ...tokenHeaders(), ...opts.headers } });
+            return res.json();
+        };
+
+        const setAuthState = (msg) => {
+            document.getElementById('auth-state').textContent = msg;
+        };
+        
+        <GAME_SCRIPT>
+        const pathSub = (s) => {
+            const t = (s || '').trim();
+            return (!t || t === '@' || t === '_') ? '@' : t;
+        };
+        const hostOf = (s) => {
+            const sub = (s.subdomain || '').trim();
+            if (!sub || sub === '@' || sub === '_') return s.domain;
+            return sub + '.' + s.domain;
+        };
+
+        const loadSites = async () => {
+            const res = await api('/sites');
+            const list = document.getElementById('sites-list');
+            list.replaceChildren();
+            if (!res.success || !res.data?.length) {
+                appendText(list, 'empty', 'No sites yet');
+                return;
+            }
+            for (const site of res.data) {
+                const row = appendText(list, 'site-item', `${hostOf(site)} ${site.handler_type} ${site.status}`);
+                appendButton(row, 'Deploy', () => deploy(site.domain, pathSub(site.subdomain)));
+                appendButton(row, 'Delete', () => remove(site.domain, pathSub(site.subdomain)));
+            }
+        };
+
+        const loadOperations = async () => {
+            const res = await api('/operations');
+            const list = document.getElementById('ops-list');
+            list.replaceChildren();
+            if (!res.success || !res.data?.length) {
+                appendText(list, 'empty', 'No operations yet');
+                return;
+            }
+            for (const op of res.data.slice(0, 20)) {
+                appendText(list, 'ops-item', `${op.op_type} ${op.status} id: ${op.id} updated: ${new Date(op.updated_at).toLocaleString()}`);
+            }
+        };
+
+        const formPayload = () => {
+            const type = document.getElementById('type').value;
+            const target = document.getElementById('target').value;
+            const config = type === 'proxy' ? { upstream: target }
+                : type === 'static' ? { root: target }
+                : type === 'composite' ? { default: { type: 'static', root: target || '/var/www' }, routes: [] }
+                : { to: target, permanent: false };
+            return {
+                subdomain: document.getElementById('subdomain').value.trim(),
+                domain: document.getElementById('domain').value.trim(),
+                handler_type: type,
+                handler_config: config,
+                tls_enabled: true
+            };
+        };
+        
+        document.getElementById('add-form').onsubmit = async (e) => {
+            e.preventDefault();
+            await api('/sites', {
+                method: 'POST',
+                body: JSON.stringify(formPayload())
+            });
+            loadSites();
+            loadOperations();
+        };
+
+        document.getElementById('oneshot-btn').onclick = async () => {
+            const payload = formPayload();
+            const res = await api('/oneshot/deploy', {
+                method: 'POST',
+                body: JSON.stringify(payload)
+            });
+
+            const chat = document.getElementById('chat');
+            if (res.success && res.data) {
+                const stepLines = (res.data.steps || []).map(s => `${s.name} [${s.status}] (attempt ${s.attempt}) - ${s.message}`).join('\n');
+                appendText(chat, 'msg msg-ai', `One-shot: ${res.data.status}\n${stepLines || 'No steps'}`);
+            } else {
+                appendText(chat, 'msg msg-ai', `One-shot error: ${res.error}`);
+            }
+            chat.scrollTop = chat.scrollHeight;
+
+            loadSites();
+            loadOperations();
+        };
+        
+        const deploy = async (domain, subdomain) => {
+            await api(`/deploy/${domain}/${pathSub(subdomain)}`, { method: 'POST' });
+            loadSites();
+            loadOperations();
+        };
+        window.deploy = deploy;
+        
+        const remove = async (domain, subdomain) => {
+            if (confirm('Delete this site?')) {
+                await api(`/sites/${domain}/${pathSub(subdomain)}`, { method: 'DELETE' });
+                loadSites();
+                loadOperations();
+            }
+        };
+        window.remove = remove;
+        
+        const chat = document.getElementById('chat');
+        document.getElementById('chat-form').onsubmit = async (e) => {
+            e.preventDefault();
+            const input = document.getElementById('chat-input');
+            const msg = input.value.trim();
+            if (!msg) return;
+            
+            appendText(chat, 'msg msg-user', msg);
+            input.value = '';
+            
+            const res = await api('/ask', { method: 'POST', body: JSON.stringify({ message: msg }) });
+            if (res.success) {
+                appendText(chat, 'msg msg-ai', res.data.explanation || JSON.stringify(res.data));
+            } else {
+                appendText(chat, 'msg msg-ai', `Error: ${res.error}`);
+            }
+            chat.scrollTop = chat.scrollHeight;
+        };
+
+        document.getElementById('auth-login-btn').onclick = async () => {
+            const username = document.getElementById('auth-user').value.trim();
+            const pw = document.getElementById('auth-pass').value;
+            const res = await api('/auth/login', {
+                method: 'POST',
+                body: JSON.stringify({ username, password: pw }),
+                headers: {}
+            });
+            if (res.success && res.data?.token) {
+                localStorage.setItem(BEACON_TOKEN_KEY, res.data.token);
+                setAuthState('Authenticated');
+            } else {
+                setAuthState('Login failed');
+            }
+        };
+        
+        loadSites();
+        loadOperations();
+        if (localStorage.getItem(BEACON_TOKEN_KEY)) {
+            setAuthState('Authenticated');
+        }
+    </script>
+</body>
+</html>

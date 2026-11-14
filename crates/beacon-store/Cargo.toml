@@ -1,0 +1,20 @@
+[package]
+license = "Apache-2.0"
+name = "beacon-store"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = []
+game_forward = ["dep:beacon-forward"]
+
+[dependencies]
+beacon-core = { path = "../beacon-core" }
+beacon-forward = { path = "../beacon-forward", optional = true }
+sqlx = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+serde_json = { workspace = true }
