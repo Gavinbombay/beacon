@@ -327,6 +327,15 @@ mod config_tests {
         serde_json::json!({"server": {}, "brain": {"api_key": uuid::Uuid::new_v4().to_string(), "api_base": "https://model.example.com", "model": std::env::var("BEACON_TEST_MODEL").unwrap_or_else(|_| uuid::Uuid::new_v4().to_string())}, "dns": {"default_ip": "192.0.2.1"}, "store": {"database_url": "postgresql://db.example.com/beacon"}})
     }
     #[test]
+    fn admin_listener_defaults_are_open_without_explicit_auth() {
+        let host = default_host()
+            .parse::<std::net::IpAddr>()
+            .expect("configured default host is an IP address");
+        assert!(host.is_unspecified());
+        assert!(!AuthConfig::default().enabled);
+    }
+
+    #[test]
     fn required_sections_and_fields_missing() {
         for section in ["server", "brain", "dns", "store"] {
             let mut v = valid();

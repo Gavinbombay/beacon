@@ -1003,6 +1003,37 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn failed_upstream_response_does_not_disclose_url_user_information() {
+        let marker = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+            .to_string();
+        let upstream = format!("http://{}:{}@localhost:1", marker, marker);
+        let router = Router::new(ProxyConfig::default());
+        router.update_sites(vec![Site {
+            id: Default::default(),
+            domain: "example.test".into(),
+            subdomain: String::new(),
+            handler_type: "proxy".into(),
+            handler_config: serde_json::json!({"upstream": upstream}),
+            tls_enabled: false,
+            status: "active".into(),
+            created_at: Default::default(),
+            updated_at: Default::default(),
+        }]);
+        let request = Request::builder()
+            .uri("/")
+            .header("host", "example.test")
+            .body(Body::empty())
+            .unwrap();
+        let response = router.handle(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        assert!(!String::from_utf8_lossy(&body).contains(&marker));
+    }
+
+    #[tokio::test]
     async fn static_fallback_and_traversal_are_portable() {
         let root =
             std::env::temp_dir().join(format!("beacon-static-portable-{}", std::process::id()));
