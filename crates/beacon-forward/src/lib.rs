@@ -202,7 +202,7 @@ impl ForwardManager {
             .collect();
 
         // Pass 1: remove stale or config-changed lanes.
-        {
+        let removed = {
             let mut lanes = self.lanes.write().await;
             let mut to_remove: Vec<String> = vec![];
             for (id, h) in lanes.iter() {
@@ -219,15 +219,17 @@ impl ForwardManager {
                     to_remove.push(id.clone());
                 }
             }
-            for id in &to_remove {
-                if let Some(h) = lanes.remove(id) {
-                    if let Some(task) = h.task.lock().await.take() {
-                        let _ = h.stop.send(true);
-                        let _ = task.await;
-                    }
-                    outcome.removed.push(id.clone());
-                }
+            to_remove
+                .into_iter()
+                .filter_map(|id| lanes.remove(&id).map(|handle| (id, handle)))
+                .collect::<Vec<_>>()
+        };
+        for (id, handle) in removed {
+            if let Some(task) = handle.task.lock().await.take() {
+                let _ = handle.stop.send(true);
+                let _ = task.await;
             }
+            outcome.removed.push(id);
         }
 
         // Pass 2: spawn missing lanes.
@@ -842,6 +844,47 @@ mod tests {
             .reconcile_from(|| async { Err::<Vec<GameForward>, _>(()) })
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn removal_releases_lane_map_before_joining_packet_bookkeeping() {
+        let mgr = ForwardManager::fixture();
+        let (stop, mut stopped) = tokio::sync::watch::channel(false);
+        let (trigger, wait_for_trigger) = tokio::sync::oneshot::channel();
+        let (started, wait_for_start) = tokio::sync::oneshot::channel();
+        let task_mgr = mgr.clone();
+        let task = tokio::spawn(async move {
+            let _ = wait_for_trigger.await;
+            let _ = started.send(());
+            let _ = task_mgr.handle("race").await;
+            let _ = stopped.changed().await;
+        });
+        let lane = Arc::new(LaneHandle {
+            forward: fwd("race", 12001, Protocol::Udp, 12002),
+            metrics: LaneMetrics::default(),
+            health: RwLock::new(LaneRuntimeHealth::default()),
+            task: tokio::sync::Mutex::new(Some(task)),
+            stop,
+        });
+        mgr.lanes.write().await.insert("race".into(), lane);
+
+        let map_guard = mgr.lanes.write().await;
+        let remove_mgr = mgr.clone();
+        let mut removal = tokio::spawn(async move { remove_mgr.apply(vec![]).await });
+        tokio::task::yield_now().await;
+        trigger.send(()).unwrap();
+        wait_for_start.await.unwrap();
+        drop(map_guard);
+
+        let completed = tokio::time::timeout(Duration::from_millis(250), &mut removal)
+            .await
+            .is_ok();
+        if !completed {
+            removal.abort();
+            let _ = removal.await;
+        }
+        assert!(completed, "lane removal waited for a task under the map lock");
+        assert!(mgr.forwards().await.is_empty());
     }
 
     fn fwd(id: &str, port: u16, proto: Protocol, target_port: u16) -> GameForward {
