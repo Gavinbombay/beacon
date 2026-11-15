@@ -12,9 +12,9 @@
 
 **A Rust edge server where sites are database rows.** Route hosts and paths to reverse proxies, static files, redirects or WebSockets. Manage them through an administrative API backed by PostgreSQL, with DNS and TLS integrations when configured.
 
-[Architecture](#architecture) · [Quickstart](#quickstart) · [Deploying behind a proxy](#deploying-behind-a-proxy) · [Security notes](docs/SECURITY.md)
+[For AI agents](#for-ai-agents) · [Architecture](#architecture) · [Quickstart](#quickstart) · [Deploying behind a proxy](#deploying-behind-a-proxy) · [Security notes](docs/SECURITY.md)
 
-Beacon grew out of the difficulty of letting automated tools edit one shared server configuration. Give each site a row and a handler instead: change the site you mean, then publish a route snapshot. Deployment totals are intentionally not product guarantees.
+Beacon grew out of the difficulty of letting automated tools edit one shared server configuration. Give each site a row and a handler instead: change the site you mean, then publish a route snapshot.
 
 Status: early open-source release (v0.2). APIs and configuration may change. Built for operators who want to understand their edge: make the front door a program you can read, test and run yourself.
 
@@ -27,6 +27,27 @@ Status: early open-source release (v0.2). APIs and configuration may change. Bui
 - TLS through rustls, hot certificate selection and ACME DNS challenges through a separately installed lego client.
 - A provider interface with Porkbun implemented; Cloudflare is a non-production skeleton.
 - Optional TCP/UDP game forwarding behind the `game_forward` build feature.
+
+## For AI agents
+
+Beacon is meant to be driven by an agent through its admin API. Every call goes to the admin listener (loopback by default) under the `/_beacon` prefix and returns JSON shaped as `{"success", "data", "error"}`.
+
+**Authenticate.** With `auth` enabled, `POST /_beacon/auth/login` with `{"username", "password"}` returns a token. Send it on every other call as `Authorization: Bearer <token>` or in the `X-Beacon-Token` header (renamed with `BEACON_TOKEN_HEADER`). With `auth` off, administration only works on loopback.
+
+| Endpoint | What it does |
+| --- | --- |
+| `GET /_beacon/health` | Liveness check, no auth |
+| `GET` / `POST /_beacon/sites` | List sites, or create one |
+| `GET` / `PATCH` / `DELETE /_beacon/sites/:domain/:subdomain` | Read, change or remove one site |
+| `POST /_beacon/deploy/:domain/:subdomain` | Deploy one site |
+| `POST /_beacon/oneshot/deploy` | Create and deploy a site in one call |
+| `GET /_beacon/operations`, `/_beacon/operations/:id` | Track long-running operations |
+| `GET /_beacon/routes` | The live route snapshot |
+| `GET /_beacon/audit` | The latest 100 audit log entries |
+| `POST /_beacon/ask` | Plain English in, structured intent out |
+| `/_beacon/forwards*` | TCP/UDP forwards, only with the `game_forward` feature |
+
+**Rules for agents.** Change the one site you mean, by its domain and subdomain, never the whole config. Read `/_beacon/routes` before and after a change to confirm it. `/_beacon/ask` with `{"message": "..."}` only parses a request into an intent using the configured model endpoint; it changes nothing, so review the intent and then make the matching call yourself. Never expose the admin listener to the internet without `auth` and an encrypted ingress (see [Security notes](docs/SECURITY.md)).
 
 ## Architecture
 
