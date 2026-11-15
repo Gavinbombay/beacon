@@ -4,15 +4,19 @@
 
 ### Your sites. One front door.
 
+[![License: Apache License 2.0](docs/badges/license.svg)](LICENSE)
+[![FF3 build: 199 passed, 0 failed at cff28dd31c56](docs/badges/build.svg)](#verified-ff3-results)
+[![Security audit: PASS, zero open findings at cff28dd31c56](docs/badges/security-audit.svg)](AUDIT.md)
+
 ![A lighthouse casting gold beams over the coast, Beacon illustration](docs/assets/beacon-hero.jpg)
 
 **A Rust edge server where sites are database rows.** Route hosts and paths to reverse proxies, static files, redirects or WebSockets. Manage them through an administrative API backed by PostgreSQL, with DNS and TLS integrations when configured.
 
-[Explore the landing page](https://gavinbombay.github.io/beacon/) · [Architecture](#architecture) · [Quickstart](#quickstart) · [Deploying behind a proxy](#deploying-behind-a-proxy) · [Security notes](docs/SECURITY.md)
+[Architecture](#architecture) · [Quickstart](#quickstart) · [Deploying behind a proxy](#deploying-behind-a-proxy) · [Security notes](docs/SECURITY.md)
 
 Beacon grew out of the difficulty of letting automated tools edit one shared server configuration. Give each site a row and a handler instead: change the site you mean, then publish a route snapshot. The lighthouse artwork and the line "Build your own, so you can break your own" come from the original Beacon story. Deployment totals are intentionally not product guarantees.
 
-Status: early open-source release (v0.2). APIs and configuration may change. This prepared landing page will become available when the repository is published and Pages is enabled separately.
+Status: early open-source release (v0.2). APIs and configuration may change. Built for operators who want to understand their edge: make the front door a program you can read, test and run yourself.
 
 ## Features
 
@@ -116,9 +120,9 @@ Administrative site writes and authoritative route reads share a Store mutex thr
 
 Static roots must be trusted and protected from concurrent modification by untrusted users. Missing files use a root-local `404.html` when present. Review `NOTICE` and dependency licenses before distribution.
 
-## Architecture and capabilities
+## Capability status
 
-The public HTTP router serves static files, proxies requests and redirects; the admin API coordinates PostgreSQL persistence, DNS and TLS. The brain adapter connects to an operator-selected model endpoint. Game forwarding is an optional feature.
+The brain adapter connects to an operator-selected model endpoint.
 
 | Capability | Status |
 | --- | --- |
@@ -225,12 +229,24 @@ Merge this example into the required configuration above. The placeholder must b
 
 When the list is present, Beacon requires exactly one matching Origin and returns 403 for missing, different or duplicate origins **before contacting the upstream**. Matching is exact, including scheme and port. An empty or malformed list refuses all upgrades. When the list is absent, prior behavior is retained: Cookie and Origin are forwarded and the upstream must validate Origin. Origin filtering is a browser boundary, not authentication for arbitrary clients. Composite handlers use the site's top-level list for all WebSocket paths.
 
+WebSocket upstream connection and handshake setup uses `proxy.request_timeout_ms` (default 30000 milliseconds). Expiry returns 504 and counts as an upstream circuit failure. The deadline does not limit established WebSocket sessions.
+
 ## First release and legacy rows
 
 There is no supported prior public version or legacy import format. Database rows whose trimmed subdomain is `@` or `_` are unsupported. Startup fails with `unsupported legacy site alias` before loading routes or binding listeners; it does not rewrite or delete those rows. Resolve unsupported data through a reviewed migration before starting Beacon. New API writes canonicalize apex names; use an empty subdomain for the apex.
 
+## Security audit
+
+Independently security-audited using Cloudflare's open-source security-audit skill (full audit, all phases): PASS, zero open findings
+
+Audited commit: `cff28dd31c5620390d6218cfa6448da0f5d07872`. Date: 2026-11-15 (America/St_Johns).
+
+Skill: [cloudflare/security-audit-skill](https://github.com/cloudflare/security-audit-skill). Read [AUDIT.md](AUDIT.md) for the audit history, all six phases and coverage limits.
+
+### Verified FF3 results
+
+The local static badges describe the audited FF3 commit above. Its recorded test matrix passed **199 tests, 0 failed**, including 45 database test executions. They are historical results for that commit; this repository has no continuous integration workflow. The later docs-only commit is checked separately and does not extend the source-audit claim to unreviewed code.
+
 ## License
 
 Apache License 2.0. Copyright 2026 **GavinBombay and Beacon contributors**. GavinBombay is the author and copyright holder named in [NOTICE](NOTICE); [LICENSE](LICENSE) defines the terms. Third-party dependency licenses remain applicable.
-
-WebSocket upstream connection and handshake setup uses `proxy.request_timeout_ms` (default 30000 milliseconds). Expiry returns 504 and counts as an upstream circuit failure. The deadline does not limit established WebSocket sessions. Database regression tests require `BEACON_TEST_DATABASE_URL` from a disposable PostgreSQL Unix-socket fixture and do not skip when it is absent.

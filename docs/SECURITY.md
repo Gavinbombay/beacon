@@ -6,7 +6,7 @@ Use the repository Security tab to report a vulnerability privately when private
 
 ## Offline release audit environment
 
-This release review uses a staged RustSec advisory database at commit 4ef2df8e806a65e2f1ecc14f56f51249062b23d6. The review runs without network access. The snapshot contains advisories, but no crates.io index entries. Consequently cargo audit and cargo deny cannot determine whether locked versions were yanked. This is an environment limitation, not evidence that all versions are unyanked. The final independent audit is a separate step.
+This release review uses a staged RustSec advisory database at commit 4ef2df8e806a65e2f1ecc14f56f51249062b23d6. The review runs without network access. The snapshot contains advisories, but no crates.io index entries. Consequently cargo audit and cargo deny cannot determine whether locked versions were yanked. This is an environment limitation, not evidence that all versions are unyanked. The final independent FF3 audit completed on 2026-11-15 at commit `cff28dd31c5620390d6218cfa6448da0f5d07872`, with zero open findings. See [the audit summary](../AUDIT.md) for the full history and limits.
 
 A maintainer with network access should refresh advisory and registry metadata and run both tools before publishing:
 

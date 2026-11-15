@@ -4,12 +4,18 @@ Description: A Rust edge server with database-backed site routing, reverse proxy
 
 Topics (12): rust, axum, reverse-proxy, edge-server, self-hosted, postgresql, static-site, websocket, tls, dns, routing, infrastructure
 
-Homepage: https://gavinbombay.github.io/beacon/
-
 Repository: https://github.com/Gavinbombay/beacon
 
-Pages settings, to apply only after approved public visibility: Settings > Pages > Build and deployment > Source: Deploy from a branch; Branch: main; Folder: /docs; Save. The tracked docs/.nojekyll disables Jekyll processing. No workflow, custom domain, CNAME or DNS change is needed. This fix prepares files only and does not enable Pages or change repository settings. The site is not yet published by this job.
+Homepage: unset. The repository README is the repo page.
 
-Author and copyright holder: GavinBombay and Beacon contributors, as recorded in NOTICE. Apache-2.0; LICENSE and NOTICE remain authoritative.
+Pages: **DROPPED**. There is no separate website. The Pages HTML, stylesheet and Jekyll bypass marker have been removed. Do not enable Pages, add a Pages workflow or configure a domain or DNS record.
 
-Assets: the hero and mark are unchanged web re-encodes from the supplied Quill collection. They are illustrations, not screenshots. Terminal screenshots are SVG renderings of actual sandbox test output, with committed capture text and a reproducible standard-library generator under docs/tools/. No deployment totals or historical dates are product claims.
+Publication is Cavilier's separate post-landing step, only after both the FF3 audit and the FF4 docs re-check pass clean. Push and merge to main without force, make the repository public, then set the description and topics above. This docs job performs no repository-settings or publishing actions.
+
+Social preview: `docs/social-preview.png`, 1280x640 PNG, under 1 MB, with no metadata. At go-public time Cavilier manually selects it in GitHub Settings > General > Social preview. It cannot be set through the API. If that manual setting is unavailable, record a follow-up for the repository owner.
+
+Author and copyright holder: GavinBombay and Beacon contributors, as recorded in NOTICE. Apache License 2.0; LICENSE and NOTICE remain authoritative.
+
+Assets: the hero and mark remain unchanged Quill web re-encodes, rather than metadata-bearing originals. The social preview fits that same supplied mark onto a dark 1280x640 canvas. These are illustrations. Terminal screenshots are SVG renderings of actual sandbox test output, with committed capture text and a reproducible generator under docs/tools/.
+
+Badges: local static SVGs under docs/badges/; the security and build badges refer to audited/tested FF3 commit cff28dd31c5620390d6218cfa6448da0f5d07872 (zero open findings; 199 passed, 0 failed). No live continuous integration badge or workflow is implied.
