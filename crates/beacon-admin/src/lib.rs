@@ -1,6 +1,6 @@
 use axum::{
     body::Body,
-    extract::{Path, State},
+    extract::{ConnectInfo, Path, State},
     http::StatusCode,
     middleware::{self, Next},
     response::Json,
@@ -246,9 +246,14 @@ struct LoginResponse {
 
 async fn login(
     State(state): State<AdminState>,
+    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
     Json(req): Json<LoginRequest>,
 ) -> Json<ApiResponse<LoginResponse>> {
-    match state.auth.login(&req.username, &req.password).await {
+    match state
+        .auth
+        .login(&req.username, &req.password, peer.ip())
+        .await
+    {
         Some(token) => Json(ApiResponse::success(LoginResponse {
             token,
             auth_enabled: state.auth.enabled(),

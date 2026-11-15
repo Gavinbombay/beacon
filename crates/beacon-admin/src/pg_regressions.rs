@@ -535,3 +535,88 @@ async fn pg_reload_cancelled_waiting_for_lock_keeps_deleted_route_withdrawn() {
     cleanup(state, control, db).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+// Exercise the real login route with transport metadata supplied by each test
+// server. Header values cannot choose or replace this metadata.
+#[tokio::test]
+async fn pg_known_admin_failures_from_one_peer_do_not_lock_out_another() {
+    use axum::extract::ConnectInfo;
+    use std::net::SocketAddr;
+    let (mut state, control, db) = fixture().await;
+    let passphrase = Uuid::new_v4().to_string();
+    state.auth = Arc::new(AuthManager::new(beacon_core::AuthConfig {
+        enabled: true,
+        username: "admin".into(),
+        password: passphrase.clone(),
+        ..Default::default()
+    }));
+    let mut servers = Vec::new();
+    let mut urls = Vec::new();
+    for peer in ["192.0.2.1:1000", "192.0.2.2:1000"] {
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        urls.push(format!(
+            "http://{}/auth/login",
+            listener.local_addr().unwrap()
+        ));
+        let app = create_routes(state.clone()).layer(axum::Extension(ConnectInfo(
+            peer.parse::<SocketAddr>().unwrap(),
+        )));
+        servers.push(tokio::spawn(async move {
+            axum::serve(listener, app.into_make_service())
+                .await
+                .unwrap();
+        }));
+    }
+    let client = reqwest::Client::new();
+    for _ in 0..5 {
+        let response: serde_json::Value = client
+            .post(&urls[0])
+            .header("x-forwarded-for", "203.0.113.1")
+            .json(&serde_json::json!({"username":"admin", "password":"[R]"}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(response["success"], false);
+    }
+    let response: serde_json::Value = client
+        .post(&urls[1])
+        // Even a forged header naming the limited peer must be ignored.
+        .header("x-forwarded-for", "192.0.2.1")
+        .json(&serde_json::json!({"username":"admin", "password":passphrase}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let independent_admission = response["success"] == true;
+    let response: serde_json::Value = client
+        .post(&urls[0])
+        .header("x-forwarded-for", "203.0.113.2")
+        .json(&serde_json::json!({"username":"admin", "password":passphrase}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let original_limited = response["success"] == false;
+    for server in servers {
+        server.abort();
+        let _ = server.await;
+    }
+    cleanup(state, control, db).await;
+    assert!(
+        independent_admission,
+        "another transport peer must still authenticate"
+    );
+    assert!(
+        original_limited,
+        "forwarded headers must not bypass the source limit"
+    );
+}

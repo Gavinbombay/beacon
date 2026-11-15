@@ -451,9 +451,20 @@ impl Router {
                 .insert("sec-websocket-protocol", protocol);
         }
 
-        let (upstream_ws, upstream_resp) = match connect_async(upstream_req).await {
-            Ok(v) => v,
-            Err(e) => {
+        let (upstream_ws, upstream_resp) = match tokio::time::timeout(
+            Duration::from_millis(self.proxy.request_timeout_ms),
+            connect_async(upstream_req),
+        )
+        .await
+        {
+            Ok(Ok(v)) => v,
+            Err(_) => {
+                self.mark_failure(&target.upstream).await;
+                return Ok(Response::builder()
+                    .status(StatusCode::GATEWAY_TIMEOUT)
+                    .body(Body::from("WebSocket upstream handshake timed out"))?);
+            }
+            Ok(Err(e)) => {
                 self.mark_failure(&target.upstream).await;
                 return Ok(Response::builder().status(StatusCode::BAD_GATEWAY).body(
                     Body::from(format!("WebSocket upstream connect failed: {}", e)),
@@ -1001,6 +1012,84 @@ fn normalize_match_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn websocket_request() -> Request {
+        let (parts, ()) = "ws://example.test/socket"
+            .into_client_request()
+            .unwrap()
+            .into_parts();
+        Request::from_parts(parts, Body::empty())
+    }
+
+    #[tokio::test]
+    async fn stalled_websocket_handshake_times_out_and_closes_upstream() {
+        use tokio::io::AsyncReadExt;
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let target = ProxyTarget {
+            upstream: format!("http://{}", listener.local_addr().unwrap()),
+            host_override: None,
+        };
+        let (closed, observed) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut data = Vec::new();
+            let read =
+                tokio::time::timeout(Duration::from_secs(2), socket.read_to_end(&mut data)).await;
+            let _ = closed.send(matches!(read, Ok(Ok(_))) && !data.is_empty());
+        });
+        let router = Router::new(ProxyConfig {
+            request_timeout_ms: 50,
+            failure_threshold: 1,
+            ..Default::default()
+        });
+        let result = tokio::time::timeout(
+            Duration::from_millis(500),
+            router.proxy_to_target(websocket_request(), &target),
+        )
+        .await;
+        let response = result
+            .expect("stalled upstream must finish within the configured bound")
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(
+            to_bytes(response.into_body(), 1024).await.unwrap(),
+            "WebSocket upstream handshake timed out"
+        );
+        assert!(router.is_circuit_open(&target.upstream).await);
+        assert!(tokio::time::timeout(Duration::from_millis(500), observed)
+            .await
+            .unwrap()
+            .unwrap());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn successful_websocket_handshake_is_preserved() {
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let target = ProxyTarget {
+            upstream: format!("http://{}", listener.local_addr().unwrap()),
+            host_override: None,
+        };
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let _stream = tokio_tungstenite::accept_async(socket).await.unwrap();
+        });
+        let router = Router::new(ProxyConfig {
+            request_timeout_ms: 1000,
+            ..Default::default()
+        });
+        let response = router
+            .proxy_to_target(websocket_request(), &target)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
+        assert!(!router.is_circuit_open(&target.upstream).await);
+        server.await.unwrap();
+    }
 
     #[tokio::test]
     async fn failed_upstream_response_does_not_disclose_url_user_information() {

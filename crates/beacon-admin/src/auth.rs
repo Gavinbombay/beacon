@@ -2,7 +2,7 @@ use axum::http::{header, HeaderMap};
 use bcrypt::verify as bcrypt_verify;
 use beacon_core::AuthConfig;
 use chrono::{Duration, Utc};
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, net::IpAddr, sync::Arc, time::Instant};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
@@ -13,14 +13,19 @@ pub struct AuthManager {
     passphrase: String,
     session_ttl_seconds: i64,
     sessions: Arc<RwLock<HashMap<String, chrono::DateTime<Utc>>>>,
-    attempts: Arc<RwLock<HashMap<String, AttemptState>>>,
+    attempts: Arc<RwLock<HashMap<IpAddr, AttemptState>>>,
     verification_slots: Arc<tokio::sync::Semaphore>,
 }
 
+// Bound unauthenticated bookkeeping independently of caller-chosen names.
+const MAX_SOURCES: usize = 1024;
+const ATTEMPTS_PER_WINDOW: u32 = 5;
+const SOURCE_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+
 #[derive(Clone, Debug)]
 struct AttemptState {
-    fail_count: u32,
-    blocked_until: Option<chrono::DateTime<Utc>>,
+    count: u32,
+    reset_at: Instant,
 }
 
 impl AuthManager {
@@ -40,14 +45,19 @@ impl AuthManager {
         self.enabled
     }
 
-    pub async fn login(&self, username: &str, password: &str) -> Option<String> {
+    pub async fn login(
+        &self,
+        username: &str,
+        supplied_passphrase: &str,
+        source: IpAddr,
+    ) -> Option<String> {
         if !self.enabled {
             return Some(Uuid::new_v4().to_string());
         }
         if self.username.trim().is_empty() || self.passphrase.trim().is_empty() {
             return None;
         }
-        if self.is_rate_limited(username).await {
+        if !self.admit_source(source).await {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             return None;
         }
@@ -59,7 +69,7 @@ impl AuthManager {
             drop(permit);
             false
         } else if self.passphrase.starts_with("$2") {
-            let supplied = password.to_owned();
+            let supplied = supplied_passphrase.to_owned();
             let hash = self.passphrase.clone();
             verify_in_background(move || {
                 let _permit = permit;
@@ -67,23 +77,21 @@ impl AuthManager {
             })
             .await
         } else {
-            let matches = self.passphrase == password;
+            let matches = self.passphrase == supplied_passphrase;
             drop(permit);
             matches
         };
         if !(ok_user && ok_pass) {
-            self.register_failed_attempt(username).await;
             tokio::time::sleep(std::time::Duration::from_millis(350)).await;
             return None;
         }
 
         self.prune_expired().await;
-        self.clear_attempts(username).await;
-        let token = Uuid::new_v4().to_string();
+        let session_id = Uuid::new_v4().to_string();
         let expires = Utc::now() + Duration::seconds(self.session_ttl_seconds);
         let mut sessions = self.sessions.write().await;
-        sessions.insert(token.clone(), expires);
-        Some(token)
+        sessions.insert(session_id.clone(), expires);
+        Some(session_id)
     }
 
     pub async fn validate_token(&self, token: &str) -> bool {
@@ -104,48 +112,33 @@ impl AuthManager {
         sessions.retain(|_, exp| *exp > now);
     }
 
-    async fn is_rate_limited(&self, username: &str) -> bool {
-        let key = if username == self.username {
-            "login"
-        } else {
-            "unknown"
-        };
-        let attempts = self.attempts.read().await;
-        let Some(state) = attempts.get(key) else {
-            return false;
-        };
-        let Some(blocked_until) = state.blocked_until else {
-            return false;
-        };
-        blocked_until > Utc::now()
+    async fn admit_source(&self, source: IpAddr) -> bool {
+        self.admit_source_with_capacity(source, MAX_SOURCES).await
     }
 
-    async fn register_failed_attempt(&self, username: &str) {
-        // Keep the single configured administrator's bucket separate from
-        // failures under arbitrary usernames, without creating per-name state.
-        let key = if username == self.username {
-            "login"
-        } else {
-            "unknown"
-        };
+    async fn admit_source_with_capacity(&self, source: IpAddr, capacity: usize) -> bool {
+        let now = Instant::now();
         let mut attempts = self.attempts.write().await;
-        let state = attempts.entry(key.to_string()).or_insert(AttemptState {
-            fail_count: 0,
-            blocked_until: None,
+        attempts.retain(|_, state| state.reset_at > now);
+        if !attempts.contains_key(&source) && attempts.len() >= capacity {
+            // Do not turn a full map into a global lockout for new peers.
+            if let Some(oldest) = attempts
+                .iter()
+                .min_by_key(|(_, state)| state.reset_at)
+                .map(|(peer, _)| *peer)
+            {
+                attempts.remove(&oldest);
+            }
+        }
+        let state = attempts.entry(source).or_insert(AttemptState {
+            count: 0,
+            reset_at: now + SOURCE_WINDOW,
         });
-
-        state.fail_count += 1;
-        if state.fail_count >= 5 {
-            state.blocked_until = Some(Utc::now() + Duration::seconds(60));
-            state.fail_count = 0;
+        if state.count >= ATTEMPTS_PER_WINDOW {
+            return false;
         }
-    }
-
-    async fn clear_attempts(&self, username: &str) {
-        // Successful login does not reset failures from other callers.
-        if username == self.username {
-            self.attempts.write().await.remove("login");
-        }
+        state.count += 1;
+        true
     }
 }
 
@@ -183,30 +176,78 @@ mod tests {
             enabled: true,
             ..Default::default()
         });
-        assert!(mgr.login("", "").await.is_none());
+        assert!(mgr.login("", "", peer()).await.is_none());
         assert!(!mgr.validate_token("").await);
     }
-    #[tokio::test]
-    async fn arbitrary_names_share_bounded_attempt_state() {
-        let mgr = AuthManager::new(AuthConfig::default());
-        for name in ["one", "two", "three", "four", "five"] {
-            mgr.register_failed_attempt(name).await;
-        }
-        assert_eq!(mgr.attempts.read().await.len(), 1);
-        assert!(mgr.is_rate_limited("another").await);
+    fn peer() -> std::net::IpAddr {
+        "192.0.2.1".parse().unwrap()
     }
+    fn other_peer() -> std::net::IpAddr {
+        "192.0.2.2".parse().unwrap()
+    }
+
     #[tokio::test]
-    async fn unknown_names_do_not_block_the_configured_administrator_bucket() {
+    async fn attempts_are_per_source_and_expire_without_sliding_on_rejection() {
+        let mgr = AuthManager::new(AuthConfig::default());
+        for _ in 0..super::ATTEMPTS_PER_WINDOW {
+            assert!(mgr.admit_source(peer()).await);
+        }
+        let expires = mgr.attempts.read().await[&peer()].reset_at;
+        assert!(!mgr.admit_source(peer()).await);
+        assert_eq!(mgr.attempts.read().await[&peer()].reset_at, expires);
+        assert!(mgr.admit_source(other_peer()).await);
+        mgr.attempts
+            .write()
+            .await
+            .get_mut(&peer())
+            .unwrap()
+            .reset_at = std::time::Instant::now();
+        assert!(mgr.admit_source(peer()).await);
+        assert_eq!(mgr.attempts.read().await[&peer()].count, 1);
+    }
+
+    #[tokio::test]
+    async fn source_map_capacity_does_not_globally_block_new_peers() {
+        let mgr = AuthManager::new(AuthConfig::default());
+        assert!(mgr.admit_source_with_capacity(peer(), 2).await);
+        assert!(mgr.admit_source_with_capacity(other_peer(), 2).await);
+        let earliest = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        mgr.attempts
+            .write()
+            .await
+            .get_mut(&peer())
+            .unwrap()
+            .reset_at = earliest;
+        let third = "203.0.113.1".parse().unwrap();
+        assert!(mgr.admit_source_with_capacity(third, 2).await);
+        let attempts = mgr.attempts.read().await;
+        assert_eq!(attempts.len(), 2);
+        assert!(!attempts.contains_key(&peer()));
+        assert!(attempts.contains_key(&other_peer()));
+        assert!(attempts.contains_key(&third));
+    }
+
+    #[tokio::test]
+    async fn arbitrary_names_cannot_expand_source_state() {
+        let passphrase = uuid::Uuid::new_v4().to_string();
         let mgr = AuthManager::new(AuthConfig {
+            enabled: true,
             username: "admin".into(),
+            password: passphrase.clone(),
             ..Default::default()
         });
-        for _ in 0..5 {
-            let unknown_name = uuid::Uuid::new_v4().to_string();
-            mgr.register_failed_attempt(&unknown_name).await;
+        for _ in 0..super::ATTEMPTS_PER_WINDOW {
+            let name = uuid::Uuid::new_v4().to_string();
+            assert!(mgr.login(&name, "[R]", peer()).await.is_none());
         }
-        assert!(!mgr.is_rate_limited("admin").await);
+        assert_eq!(mgr.attempts.read().await.len(), 1);
+        assert!(!mgr.admit_source(peer()).await);
+        assert!(mgr
+            .login("admin", &passphrase, other_peer())
+            .await
+            .is_some());
     }
+
     #[tokio::test(flavor = "current_thread")]
     async fn blocking_verification_does_not_occupy_async_worker() {
         let (started, observed) = tokio::sync::oneshot::channel();
@@ -240,7 +281,7 @@ mod tests {
             .acquire_owned()
             .await
             .unwrap();
-        assert!(mgr.login("admin", "").await.is_none());
+        assert!(mgr.login("admin", "", peer()).await.is_none());
     }
 
     // Poll both rejection futures into their fixed delays without waiting for
@@ -258,11 +299,11 @@ mod tests {
         let name = if known_name { "admin" } else { "unknown" };
         if blocked {
             for _ in 0..5 {
-                mgr.register_failed_attempt(name).await;
+                assert!(mgr.admit_source(peer()).await);
             }
         }
-        let mut first = Box::pin(mgr.login(name, ""));
-        let mut second = Box::pin(mgr.login(name, ""));
+        let mut first = Box::pin(mgr.login(name, "", peer()));
+        let mut second = Box::pin(mgr.login(name, "", peer()));
         std::future::poll_fn(|cx| {
             assert!(first.as_mut().poll(cx).is_pending());
             assert!(second.as_mut().poll(cx).is_pending());
@@ -272,7 +313,7 @@ mod tests {
         assert_eq!(mgr.verification_slots.available_permits(), 2);
         assert!(tokio::time::timeout(
             std::time::Duration::from_millis(100),
-            mgr.login("admin", &passphrase)
+            mgr.login("admin", &passphrase, other_peer())
         )
         .await
         .unwrap()
@@ -308,8 +349,8 @@ mod tests {
             session_ttl_seconds: 300,
         });
 
-        let token = mgr.login("admin", &passphrase).await;
-        assert!(token.is_some());
+        let session_id = mgr.login("admin", &passphrase, other_peer()).await;
+        assert!(session_id.is_some());
     }
 
     #[tokio::test]
@@ -322,11 +363,15 @@ mod tests {
         });
 
         for _ in 0..5 {
-            let res = mgr.login("admin", &uuid::Uuid::new_v4().to_string()).await;
+            let res = mgr
+                .login("admin", &uuid::Uuid::new_v4().to_string(), peer())
+                .await;
             assert!(res.is_none());
         }
 
-        let blocked = mgr.login("admin", &uuid::Uuid::new_v4().to_string()).await;
+        let blocked = mgr
+            .login("admin", &uuid::Uuid::new_v4().to_string(), peer())
+            .await;
         assert!(blocked.is_none());
     }
 }

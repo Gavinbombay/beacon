@@ -221,9 +221,12 @@ async fn main() -> Result<()> {
 
     let admin_listener = tokio::net::TcpListener::bind(admin_addr).await?;
     let admin_srv = async move {
-        axum::serve(admin_listener, admin_app.into_make_service())
-            .await
-            .map_err(|e| anyhow::anyhow!(e))
+        axum::serve(
+            admin_listener,
+            admin_app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!(e))
     };
 
     if config.tls.enabled {
