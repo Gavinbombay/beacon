@@ -1209,14 +1209,7 @@ mod tests {
         } else {
             assert_eq!(headers["x-forwarded-for"], peer.ip().to_string());
             assert_eq!(headers["x-real-ip"], peer.ip().to_string());
-            assert_eq!(
-                headers["x-forwarded-host"],
-                if websocket {
-                    "example.com"
-                } else {
-                    "example.com"
-                }
-            );
+            assert_eq!(headers["x-forwarded-host"], "example.com");
             assert_eq!(headers["x-forwarded-proto"], "http");
             assert_eq!(
                 headers["forwarded"],
