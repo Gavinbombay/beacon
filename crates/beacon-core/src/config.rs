@@ -140,6 +140,10 @@ pub struct StoreConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProxyConfig {
+    #[serde(default)]
+    pub trusted_proxies: Vec<ipnet::IpNet>,
+    #[serde(default)]
+    pub preserve_forwarded_headers: bool,
     #[serde(default = "default_connect_timeout_ms")]
     pub connect_timeout_ms: u64,
     #[serde(default = "default_request_timeout_ms")]
@@ -155,6 +159,8 @@ pub struct ProxyConfig {
 impl Default for ProxyConfig {
     fn default() -> Self {
         Self {
+            trusted_proxies: Vec::new(),
+            preserve_forwarded_headers: false,
             connect_timeout_ms: default_connect_timeout_ms(),
             request_timeout_ms: default_request_timeout_ms(),
             max_request_body_bytes: default_max_request_body_bytes(),
@@ -187,6 +193,8 @@ fn default_circuit_open_seconds() -> u64 {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AuthConfig {
     #[serde(default)]
+    pub trusted_proxies: Vec<ipnet::IpNet>,
+    #[serde(default)]
     pub enabled: bool,
     #[serde(default)]
     pub username: String,
@@ -203,6 +211,7 @@ impl Default for AuthConfig {
             username: String::new(),
             password: String::new(),
             session_ttl_seconds: default_session_ttl_seconds(),
+            trusted_proxies: Vec::new(),
         }
     }
 }

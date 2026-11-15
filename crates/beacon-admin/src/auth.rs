@@ -9,6 +9,7 @@ use uuid::Uuid;
 #[derive(Clone)]
 pub struct AuthManager {
     enabled: bool,
+    proxy_policy: beacon_core::ProxyConfig,
     username: String,
     passphrase: String,
     session_ttl_seconds: i64,
@@ -31,6 +32,10 @@ struct AttemptState {
 impl AuthManager {
     pub fn new(config: AuthConfig) -> Self {
         Self {
+            proxy_policy: beacon_core::ProxyConfig {
+                trusted_proxies: config.trusted_proxies,
+                ..Default::default()
+            },
             enabled: config.enabled,
             username: config.username,
             passphrase: config.password,
@@ -39,6 +44,15 @@ impl AuthManager {
             attempts: Arc::new(RwLock::new(HashMap::new())),
             verification_slots: Arc::new(tokio::sync::Semaphore::new(2)),
         }
+    }
+
+    pub fn login_source(&self, peer: IpAddr, headers: &HeaderMap) -> IpAddr {
+        let mut values = headers.get_all("x-forwarded-for").iter();
+        let chain = values.next().and_then(|v| v.to_str().ok());
+        if values.next().is_some() {
+            return peer;
+        }
+        beacon_core::forwarded_client(peer, chain, &self.proxy_policy.trusted_proxies)
     }
 
     pub fn enabled(&self) -> bool {
@@ -170,6 +184,27 @@ pub fn extract_token(headers: &HeaderMap, header_name: &str) -> Option<String> {
 mod tests {
     use super::AuthManager;
     use beacon_core::AuthConfig;
+    #[test]
+    fn ff3_forwarded_budget_requires_a_trusted_transport_peer() {
+        let config =
+            serde_json::from_value(serde_json::json!({"trusted_proxies":["192.0.2.0/24"]}))
+                .unwrap();
+        let mgr = AuthManager::new(config);
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("x-forwarded-for", "198.51.100.7".parse().unwrap());
+        let trusted = "192.0.2.5".parse().unwrap();
+        let untrusted = "203.0.113.5".parse().unwrap();
+        assert_eq!(
+            mgr.login_source(trusted, &headers),
+            "198.51.100.7".parse::<std::net::IpAddr>().unwrap()
+        );
+        assert_eq!(mgr.login_source(untrusted, &headers), untrusted);
+        let default = AuthManager::new(Default::default());
+        assert_eq!(default.login_source(trusted, &headers), trusted);
+        headers.append("x-forwarded-for", "198.51.100.8".parse().unwrap());
+        assert_eq!(mgr.login_source(trusted, &headers), trusted);
+    }
+
     #[tokio::test]
     async fn empty_enabled_pair_never_issues_session() {
         let mgr = AuthManager::new(AuthConfig {
@@ -348,6 +383,7 @@ mod tests {
             username: "admin".to_string(),
             password: hash,
             session_ttl_seconds: 300,
+            trusted_proxies: Vec::new(),
         });
 
         let session_id = mgr.login("admin", &passphrase, other_peer()).await;
@@ -361,6 +397,7 @@ mod tests {
             username: "admin".to_string(),
             password: uuid::Uuid::new_v4().to_string(),
             session_ttl_seconds: 300,
+            trusted_proxies: Vec::new(),
         });
 
         for _ in 0..5 {

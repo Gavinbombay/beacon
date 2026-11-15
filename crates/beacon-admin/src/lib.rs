@@ -1,7 +1,7 @@
 use axum::{
     body::Body,
     extract::{ConnectInfo, Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     middleware::{self, Next},
     response::Json,
     response::Response,
@@ -247,11 +247,16 @@ struct LoginResponse {
 async fn login(
     State(state): State<AdminState>,
     ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
     Json(req): Json<LoginRequest>,
 ) -> Json<ApiResponse<LoginResponse>> {
     match state
         .auth
-        .login(&req.username, &req.password, peer.ip())
+        .login(
+            &req.username,
+            &req.password,
+            state.auth.login_source(peer.ip(), &headers),
+        )
         .await
     {
         Some(token) => Json(ApiResponse::success(LoginResponse {

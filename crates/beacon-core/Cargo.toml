@@ -14,3 +14,5 @@ chrono.workspace = true
 toml.workspace = true
 tracing.workspace = true
 url = "2"
+
+ipnet = { version = "2", features = ["serde"] }

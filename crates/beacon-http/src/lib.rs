@@ -30,6 +30,10 @@ use tokio_tungstenite::{
     WebSocketStream,
 };
 
+/// Set only by the TLS listener after a successful TLS handshake.
+#[derive(Clone, Copy)]
+pub struct TlsTransport;
+
 #[derive(Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum Handler {
@@ -95,6 +99,7 @@ enum MatchKind {
 #[derive(Serialize)]
 struct RouteEntry {
     host: String,
+    websocket_allowed_origins: Option<Vec<String>>,
     handler: Handler,
 }
 
@@ -218,6 +223,21 @@ impl Router {
                 };
                 RouteEntry {
                     host: site.full_domain(),
+                    websocket_allowed_origins: site
+                        .handler_config
+                        .get("websocket_allowed_origins")
+                        .map(|v| {
+                            v.as_array()
+                                .filter(|items| items.iter().all(Value::is_string))
+                                .map(|items| {
+                                    items
+                                        .iter()
+                                        .filter_map(Value::as_str)
+                                        .map(str::to_owned)
+                                        .collect()
+                                })
+                                .unwrap_or_default()
+                        }),
                     handler,
                 }
             })
@@ -253,6 +273,19 @@ impl Router {
 
         for entry in routes.iter() {
             if host_matches(&host, &entry.host) {
+                if self.is_websocket_upgrade(req.headers()) {
+                    if let Some(allowed) = &entry.websocket_allowed_origins {
+                        let mut origins = req.headers().get_all(header::ORIGIN).iter();
+                        let origin = origins.next().and_then(|v| v.to_str().ok());
+                        if origins.next().is_some()
+                            || !origin.is_some_and(|v| allowed.iter().any(|item| item == v))
+                        {
+                            return Ok(Response::builder()
+                                .status(StatusCode::FORBIDDEN)
+                                .body(Body::from("WebSocket Origin refused"))?);
+                        }
+                    }
+                }
                 return self.dispatch_handler(req, &entry.handler).await;
             }
         }
@@ -349,18 +382,14 @@ impl Router {
             .request(parts.method.clone(), &url)
             .body(body_bytes.clone());
 
-        let mut forwarded_headers = self.forward_headers(&parts.headers);
+        let mut forwarded_headers = self.forward_headers(&parts.headers, &parts.extensions);
         if let Some(host_override) = &target.host_override {
             if let Ok(value) = HeaderValue::from_str(host_override) {
                 forwarded_headers.insert(header::HOST, value);
             }
         }
 
-        for (name, value) in forwarded_headers {
-            if let Some(name) = name {
-                req_builder = req_builder.header(name, value);
-            }
-        }
+        req_builder = req_builder.headers(forwarded_headers);
 
         let resp = match req_builder.send().await {
             Ok(resp) => resp,
@@ -421,22 +450,12 @@ impl Router {
         let upstream_url = build_upstream_ws_url(&target.upstream, &path);
         let mut upstream_req = upstream_url.into_client_request()?;
 
-        for (name, value) in req.headers() {
+        for (name, value) in &self.forward_headers(req.headers(), req.extensions()) {
             if should_forward_ws_header(name.as_str()) {
                 upstream_req
                     .headers_mut()
-                    .insert(name.clone(), value.clone());
+                    .append(name.clone(), value.clone());
             }
-        }
-
-        if let Some(host) = req.headers().get(header::HOST).cloned() {
-            upstream_req.headers_mut().insert("x-forwarded-host", host);
-        }
-
-        if !upstream_req.headers().contains_key("x-forwarded-proto") {
-            upstream_req
-                .headers_mut()
-                .insert("x-forwarded-proto", HeaderValue::from_static("http"));
         }
 
         if let Some(host_override) = &target.host_override {
@@ -613,23 +632,82 @@ impl Router {
         connection.contains("upgrade") && upgrade == "websocket"
     }
 
-    fn forward_headers(&self, headers: &HeaderMap) -> HeaderMap {
+    fn forward_headers(
+        &self,
+        headers: &HeaderMap,
+        extensions: &axum::http::Extensions,
+    ) -> HeaderMap {
+        let peer = extensions
+            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+            .map(|v| v.0.ip());
+        let preserve = self.proxy.preserve_forwarded_headers
+            && peer.is_some_and(|v| beacon_core::trusted_peer(v, &self.proxy.trusted_proxies));
+        let identity = [
+            "x-forwarded-for",
+            "x-real-ip",
+            "forwarded",
+            "x-forwarded-host",
+            "x-forwarded-proto",
+        ];
         let mut out = HeaderMap::new();
-
         for (name, value) in headers {
-            if !is_hop_by_hop(name.as_str()) {
-                out.insert(name.clone(), value.clone());
+            if !is_hop_by_hop(name.as_str()) && (preserve || !identity.contains(&name.as_str())) {
+                out.append(name.clone(), value.clone());
             }
         }
-
-        if let Some(host) = headers.get(header::HOST).cloned() {
-            out.insert("x-forwarded-host", host);
+        let scheme = if extensions.get::<TlsTransport>().is_some() {
+            "https"
+        } else {
+            "http"
+        };
+        if !preserve || !out.contains_key("x-forwarded-host") {
+            if let Some(host) = headers.get(header::HOST).cloned() {
+                out.insert("x-forwarded-host", host);
+            }
         }
-
-        if !out.contains_key("x-forwarded-proto") {
-            out.insert("x-forwarded-proto", HeaderValue::from_static("http"));
+        if !preserve || !out.contains_key("x-forwarded-proto") {
+            out.insert("x-forwarded-proto", HeaderValue::from_static(scheme));
         }
-
+        if let Some(peer) = peer {
+            let mut values = headers.get_all("x-forwarded-for").iter();
+            let chain = values.next().and_then(|v| v.to_str().ok());
+            let chain = if values.next().is_none() { chain } else { None };
+            let client = if preserve {
+                beacon_core::forwarded_client(peer, chain, &self.proxy.trusted_proxies)
+            } else {
+                peer
+            };
+            out.insert(
+                "x-real-ip",
+                HeaderValue::from_str(&client.to_string()).expect("IP header"),
+            );
+            if let Some(chain) = chain.filter(|_| preserve) {
+                out.remove("x-forwarded-for");
+                out.insert(
+                    "x-forwarded-for",
+                    HeaderValue::from_str(&format!("{}, {}", chain, peer))
+                        .expect("existing header and IP"),
+                );
+            } else {
+                out.insert(
+                    "x-forwarded-for",
+                    HeaderValue::from_str(&peer.to_string()).expect("IP header"),
+                );
+            }
+            if !preserve {
+                out.remove("forwarded");
+            }
+            let node = if peer.is_ipv6() {
+                format!("[{peer}]")
+            } else {
+                peer.to_string()
+            };
+            out.append(
+                "forwarded",
+                HeaderValue::from_str(&format!("for=\"{}\";proto={}", node, scheme))
+                    .expect("IP and scheme header"),
+            );
+        }
         out
     }
 
@@ -697,6 +775,7 @@ fn should_forward_ws_header(name: &str) -> bool {
             | "x-forwarded-host"
             | "x-forwarded-proto"
             | "x-real-ip"
+            | "forwarded"
     )
 }
 
@@ -1012,6 +1091,255 @@ fn normalize_match_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // These tests use actual local upstream handshakes and serde configuration
+    // so their behavior can also be replayed on the input revision.
+    // tungstenite fixes this callback error type to a handshake response.
+    #[allow(clippy::result_large_err)]
+    async fn ff3_identity_transport(websocket: bool, preserve: bool, trusted: bool) {
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let upstream = format!("http://{}", listener.local_addr().unwrap());
+        let (sent, received) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let headers = if websocket {
+                let mut captured = None;
+                let _ws = tokio_tungstenite::accept_hdr_async(
+                    stream,
+                    |req: &tokio_tungstenite::tungstenite::handshake::server::Request, response| {
+                        captured = Some(req.headers().clone());
+                        Ok(response)
+                    },
+                )
+                .await
+                .unwrap();
+                captured.unwrap()
+            } else {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut data = Vec::new();
+                loop {
+                    let mut byte = [0];
+                    stream.read_exact(&mut byte).await.unwrap();
+                    data.push(byte[0]);
+                    if data.ends_with(b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let text = String::from_utf8(data).unwrap();
+                let mut captured = HeaderMap::new();
+                for line in text.lines().skip(1).filter(|v| !v.is_empty()) {
+                    let (name, value) = line.split_once(':').unwrap();
+                    captured.append(
+                        name.parse::<axum::http::HeaderName>().unwrap(),
+                        value.trim().parse().unwrap(),
+                    );
+                }
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    .await
+                    .unwrap();
+                captured
+            };
+            let _ = sent.send(headers);
+        });
+        let config = serde_json::from_value(serde_json::json!({
+            "trusted_proxies": ["192.0.2.0/24"], "preserve_forwarded_headers": preserve
+        }))
+        .unwrap();
+        let router = Router::new(config);
+        let mut request = if websocket {
+            websocket_request()
+        } else {
+            Request::builder()
+                .uri("/")
+                .header("host", "example.com")
+                .body(Body::empty())
+                .unwrap()
+        };
+        for (name, value) in [
+            ("x-forwarded-for", "198.51.100.7"),
+            ("x-real-ip", "203.0.113.7"),
+            ("forwarded", "for=198.51.100.7;proto=https"),
+            ("x-forwarded-host", "example.net"),
+            ("x-forwarded-proto", "https"),
+        ] {
+            request.headers_mut().insert(name, value.parse().unwrap());
+        }
+        let peer = if trusted {
+            "192.0.2.5:1234"
+        } else {
+            "203.0.113.5:1234"
+        }
+        .parse::<std::net::SocketAddr>()
+        .unwrap();
+        request
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(peer));
+        let response = router
+            .proxy_to_target(
+                request,
+                &ProxyTarget {
+                    upstream,
+                    host_override: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            if websocket {
+                StatusCode::SWITCHING_PROTOCOLS
+            } else {
+                StatusCode::OK
+            }
+        );
+        let headers = tokio::time::timeout(Duration::from_secs(2), received)
+            .await
+            .unwrap()
+            .unwrap();
+        server.await.unwrap();
+        if preserve && trusted {
+            assert_eq!(headers["x-forwarded-for"], "198.51.100.7, 192.0.2.5");
+            assert_eq!(headers["x-real-ip"], "198.51.100.7");
+            assert_eq!(headers["x-forwarded-host"], "example.net");
+            assert_eq!(headers["x-forwarded-proto"], "https");
+            assert_eq!(headers.get_all("forwarded").iter().count(), 2);
+        } else {
+            assert_eq!(headers["x-forwarded-for"], peer.ip().to_string());
+            assert_eq!(headers["x-real-ip"], peer.ip().to_string());
+            assert_eq!(
+                headers["x-forwarded-host"],
+                if websocket {
+                    "example.test"
+                } else {
+                    "example.com"
+                }
+            );
+            assert_eq!(headers["x-forwarded-proto"], "http");
+            assert_eq!(
+                headers["forwarded"],
+                format!("for=\"{}\";proto=http", peer.ip())
+            );
+        }
+    }
+    #[tokio::test]
+    async fn ff3_http_forwarded_identity_policy() {
+        for (preserve, trusted) in [(false, true), (false, false), (true, true), (true, false)] {
+            ff3_identity_transport(false, preserve, trusted).await;
+        }
+    }
+    #[tokio::test]
+    async fn ff3_websocket_forwarded_identity_policy() {
+        for (preserve, trusted) in [(false, true), (false, false), (true, true), (true, false)] {
+            ff3_identity_transport(true, preserve, trusted).await;
+        }
+    }
+    #[tokio::test]
+    async fn ff3_websocket_origin_policy_precedes_upstream_contact() {
+        for (list, origin, permitted) in [
+            (
+                Some(serde_json::json!(["https://example.com"])),
+                Some("https://example.com"),
+                true,
+            ),
+            (
+                Some(serde_json::json!(["https://example.com"])),
+                Some("https://example.net"),
+                false,
+            ),
+            (
+                Some(serde_json::json!(["https://example.com"])),
+                None,
+                false,
+            ),
+            (None, None, true),
+            (
+                Some(serde_json::json!([])),
+                Some("https://example.com"),
+                false,
+            ),
+            (
+                Some(serde_json::json!("invalid")),
+                Some("https://example.com"),
+                false,
+            ),
+        ] {
+            let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+                .await
+                .unwrap();
+            let mut config = serde_json::json!({"upstream":format!("http://{}", listener.local_addr().unwrap())});
+            if let Some(list) = list {
+                config["websocket_allowed_origins"] = list;
+            }
+            let router = Router::default();
+            router.update_sites(vec![Site {
+                id: Default::default(),
+                domain: "example.test".into(),
+                subdomain: String::new(),
+                handler_type: "proxy".into(),
+                handler_config: config,
+                tls_enabled: false,
+                status: "active".into(),
+                created_at: Default::default(),
+                updated_at: Default::default(),
+            }]);
+            let mut request = websocket_request();
+            if let Some(origin) = origin {
+                request
+                    .headers_mut()
+                    .insert(header::ORIGIN, origin.parse().unwrap());
+            }
+            if permitted {
+                let server = tokio::spawn(async move {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let _ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+                });
+                assert_eq!(
+                    router.handle(request).await.unwrap().status(),
+                    StatusCode::SWITCHING_PROTOCOLS
+                );
+                server.await.unwrap();
+            } else {
+                // Queueing a connection would make accept immediately ready, including
+                // if the proxy returned a timeout instead of refusing the upgrade.
+                let response = router.handle(request).await.unwrap();
+                assert_eq!(response.status(), StatusCode::FORBIDDEN);
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(25), listener.accept())
+                        .await
+                        .is_err()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ff3_tls_scheme_and_ipv6_are_listener_derived() {
+        let router = Router::default();
+        let mut request = Request::builder()
+            .header("host", "example.com")
+            .header("x-forwarded-proto", "http")
+            .body(Body::empty())
+            .unwrap();
+        let address = std::net::Ipv6Addr::from(
+            std::net::Ipv4Addr::new(192, 0, 2, 5)
+                .to_ipv6_mapped()
+                .octets(),
+        );
+        let peer = std::net::SocketAddr::new(address.into(), 1234);
+        request
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(peer));
+        request.extensions_mut().insert(TlsTransport);
+        let headers = router.forward_headers(request.headers(), request.extensions());
+        assert_eq!(headers["x-forwarded-proto"], "https");
+        assert_eq!(
+            headers["forwarded"],
+            format!("for=\"[{}]\";proto=https", address)
+        );
+    }
 
     fn websocket_request() -> Request {
         let (parts, ()) = "ws://example.test/socket"

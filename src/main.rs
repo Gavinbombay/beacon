@@ -20,9 +20,13 @@ async fn serve_https(
     app: axum::Router,
 ) -> Result<()> {
     loop {
-        let (stream, _) = listener.accept().await?;
+        let (stream, peer) = listener.accept().await?;
         let acceptor = acceptor.clone();
-        let service = hyper_util::service::TowerToHyperService::new(app.clone());
+        let service = hyper_util::service::TowerToHyperService::new(
+            app.clone()
+                .layer(axum::Extension(axum::extract::ConnectInfo(peer)))
+                .layer(axum::Extension(beacon_http::TlsTransport)),
+        );
         tokio::spawn(async move {
             let Ok(Ok(stream)) =
                 tokio::time::timeout(std::time::Duration::from_secs(10), acceptor.accept(stream))
@@ -282,9 +286,12 @@ async fn main() -> Result<()> {
     } else {
         let public_listener = tokio::net::TcpListener::bind(public_addr).await?;
         let public_srv = async move {
-            axum::serve(public_listener, public_app.into_make_service())
-                .await
-                .map_err(|e| anyhow::anyhow!(e))
+            axum::serve(
+                public_listener,
+                public_app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!(e))
         };
         tokio::try_join!(admin_srv, public_srv)?;
     }

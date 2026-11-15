@@ -575,7 +575,7 @@ async fn pg_known_admin_failures_from_one_peer_do_not_lock_out_another() {
         let response: serde_json::Value = client
             .post(&urls[0])
             .header("x-forwarded-for", "203.0.113.1")
-            .json(&serde_json::json!({"username":"admin", "password":"[R]"}))
+            .json(&serde_json::json!({"username":"admin", "password":Uuid::new_v4().to_string()}))
             .send()
             .await
             .unwrap()
@@ -620,4 +620,140 @@ async fn pg_known_admin_failures_from_one_peer_do_not_lock_out_another() {
         original_limited,
         "forwarded headers must not bypass the source limit"
     );
+}
+
+// A trusted proxy must append the observed client to X-Forwarded-For.
+// Use serde here so this same behavioral test can run against the pre-fix schema.
+#[tokio::test]
+async fn pg_ff3_shared_proxy_clients_have_independent_budgets() {
+    use axum::extract::ConnectInfo;
+    let (mut state, control, db) = fixture().await;
+    let config: beacon_core::AuthConfig = serde_json::from_value(serde_json::json!({
+        "enabled": true, "username": "admin", "password": Uuid::new_v4().to_string(),
+        "trusted_proxies": ["192.0.2.0/24"]
+    }))
+    .unwrap();
+    let passphrase = config.password.clone();
+    state.auth = Arc::new(AuthManager::new(config));
+    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+    let url = format!("http://{}/auth/login", listener.local_addr().unwrap());
+    let app = create_routes(state.clone()).layer(axum::Extension(ConnectInfo(
+        "192.0.2.5:1000".parse::<std::net::SocketAddr>().unwrap(),
+    )));
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app.into_make_service())
+            .await
+            .unwrap();
+    });
+    let client = reqwest::Client::new();
+    for _ in 0..5 {
+        let response: serde_json::Value = client.post(&url).header("x-forwarded-for", "198.51.100.7")
+            .json(&serde_json::json!({"username": Uuid::new_v4().to_string(), "password": Uuid::new_v4().to_string()}))
+            .send().await.unwrap().json().await.unwrap();
+        assert_eq!(response["success"], false);
+    }
+    let response: serde_json::Value = client
+        .post(&url)
+        .header("x-forwarded-for", "198.51.100.8")
+        .json(&serde_json::json!({"username":"admin", "password":passphrase}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let independent = response["success"] == true;
+    let response: serde_json::Value = client
+        .post(&url)
+        .header("x-forwarded-for", "198.51.100.7")
+        .json(&serde_json::json!({"username":"admin", "password":passphrase}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let limited = response["success"] == false;
+    server.abort();
+    let _ = server.await;
+    cleanup(state, control, db).await;
+    assert!(
+        independent,
+        "admin behind the same trusted proxy gets its own client budget"
+    );
+    assert!(
+        limited,
+        "many usernames from one forwarded client share one budget"
+    );
+}
+
+#[tokio::test]
+async fn pg_ff3_legacy_alias_startup_fails_closed_before_routing() {
+    use sqlx_core::row::Row;
+    for alias in ["@", "_"] {
+        let (state, control, db) = fixture().await;
+        let db_url = std::env::var("BEACON_TEST_DATABASE_URL").unwrap().replacen(
+            "/postgres?",
+            &format!("/{db}?"),
+            1,
+        );
+        let pool = sqlx_postgres::PgPool::connect(&db_url).await.unwrap();
+        sqlx_core::query::query("INSERT INTO sites (domain, subdomain, handler_type, handler_config) VALUES ('example.com', $1, 'redirect', '{}')")
+            .bind(alias).execute(&pool).await.unwrap();
+        let result = state.store.run_migrations().await;
+        // main propagates this error before loading sites or creating any listener.
+        let rejected = result
+            .as_ref()
+            .err()
+            .is_some_and(|e| e.to_string().contains("unsupported legacy site alias"));
+        let retained: i64 =
+            sqlx_core::query::query("SELECT COUNT(*) AS count FROM sites WHERE subdomain = $1")
+                .bind(alias)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+                .get("count");
+        assert!(state.http_router.list_routes().is_empty());
+        let config = serde_json::json!({
+            "server":{"http_port":0,"https_port":0,"admin_port":0},
+            "brain":{"api_key":Uuid::new_v4().to_string(),"api_base":"https://example.com","model":Uuid::new_v4().to_string()},
+            "dns":{"default_ip":"192.0.2.1"}, "store":{"database_url":db_url}
+        });
+        let output = tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio::process::Command::new(
+                std::env::var("BEACON_TEST_BINARY")
+                    .expect("build the Beacon binary before PostgreSQL startup tests"),
+            )
+            .env_clear()
+            .env("BEACON_CONFIG_JSON", config.to_string())
+            .env("RUST_LOG", "info")
+            .kill_on_drop(true)
+            .output(),
+        )
+        .await;
+        let startup_rejected = output.as_ref().is_ok_and(|v| {
+            v.as_ref().is_ok_and(|o| {
+                !o.status.success()
+                    && String::from_utf8_lossy(&o.stderr).contains("unsupported legacy site alias")
+                    && !String::from_utf8_lossy(&o.stdout).contains("listening")
+            })
+        });
+        pool.close().await;
+        cleanup(state, control, db).await;
+        assert!(
+            rejected,
+            "migration must reject imported alias with a clear error"
+        );
+        assert!(
+            startup_rejected,
+            "real startup must fail before binding any listener"
+        );
+        assert_eq!(
+            retained, 1,
+            "unsupported rows must not be rewritten or deleted"
+        );
+    }
 }

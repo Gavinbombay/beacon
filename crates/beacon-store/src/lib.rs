@@ -524,11 +524,11 @@ fn migration_statements() -> Vec<&'static str> {
                 created_at TIMESTAMPTZ DEFAULT NOW(),
                 updated_at TIMESTAMPTZ DEFAULT NOW()
             )"#,
-        r#"DELETE FROM sites a USING sites b
-                WHERE a.domain = b.domain
-                  AND a.subdomain IN ('@', '_')
-                  AND b.subdomain = ''"#,
-        r#"UPDATE sites SET subdomain = '' WHERE subdomain IN ('@', '_')"#,
+        r#"DO $$ BEGIN
+                IF EXISTS (SELECT 1 FROM sites WHERE btrim(subdomain) IN ('@', '_')) THEN
+                    RAISE EXCEPTION 'unsupported legacy site alias: @ and _ rows must be resolved before startup';
+                END IF;
+            END $$"#,
         r#"CREATE UNIQUE INDEX IF NOT EXISTS sites_domain_canonical_sub
                 ON sites (domain, (CASE WHEN btrim(subdomain) IN ('', '@', '_') THEN '' ELSE btrim(subdomain) END))"#,
         #[cfg(feature = "game_forward")]
