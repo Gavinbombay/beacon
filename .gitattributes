@@ -1,1 +1,8 @@
 * text eol=lf
+
+# Raster assets must retain their exact bytes in every checkout.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.ico binary

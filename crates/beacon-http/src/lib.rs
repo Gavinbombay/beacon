@@ -1212,7 +1212,7 @@ mod tests {
             assert_eq!(
                 headers["x-forwarded-host"],
                 if websocket {
-                    "example.test"
+                    "example.com"
                 } else {
                     "example.com"
                 }
@@ -1273,10 +1273,12 @@ mod tests {
             if let Some(list) = list {
                 config["websocket_allowed_origins"] = list;
             }
-            let router = Router::default();
+            let router = Router::new(
+                serde_json::from_value(serde_json::json!({"request_timeout_ms":500})).unwrap(),
+            );
             router.update_sites(vec![Site {
                 id: Default::default(),
-                domain: "example.test".into(),
+                domain: "example.com".into(),
                 subdomain: String::new(),
                 handler_type: "proxy".into(),
                 handler_config: config,
@@ -1342,7 +1344,7 @@ mod tests {
     }
 
     fn websocket_request() -> Request {
-        let (parts, ()) = "ws://example.test/socket"
+        let (parts, ()) = "ws://example.com/socket"
             .into_client_request()
             .unwrap()
             .into_parts();

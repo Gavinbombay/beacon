@@ -83,8 +83,11 @@ Use Rust and Cargo 1.98.1 with rustfmt. The lockfile pins the dependency graph. 
 ```sh
 sh ./check-toolchain.sh
 cargo fmt --all -- --check
+cargo build --locked --offline
+export BEACON_TEST_BINARY="$PWD/target/debug/beacon"
 cargo test --locked --offline --workspace --all-targets
 cargo build --locked --offline --release
+cargo build --locked --offline --features game_forward
 cargo test --locked --offline --workspace --all-targets --features game_forward
 cargo build --locked --offline --release --features game_forward
 ```
@@ -172,6 +175,8 @@ This is pre-1.0 software. Keep management on trusted networks and protect every 
 The release review ran offline against RustSec advisory-db commit `4ef2df8e806a65e2f1ecc14f56f51249062b23d6`. The staged database lacks crates.io index records, so **yanked status was not checked**. Maintainers with network access should run `cargo audit` and `cargo deny check advisories bans licenses sources` without offline/no-fetch flags, confirm index lookups succeed and investigate missing-index diagnostics. Repeat cargo-deny with `--features game_forward`. See [dependency audit environment](docs/SECURITY.md).
 
 ## PostgreSQL regression tests
+
+Build the Beacon executable with `cargo build --locked --offline` first and set `BEACON_TEST_BINARY` to its absolute path (or to the matching `CARGO_TARGET_DIR` executable). Build again with `--features game_forward` before that feature suite. The startup regression launches this exact executable with isolated runtime configuration, requires a clear migration failure and checks that no listener was opened.
 
 The administration tests require `BEACON_TEST_DATABASE_URL` pointing to a disposable PostgreSQL cluster whose role can create databases. The lane fixture uses only a private Unix socket with no TCP listener. Each test creates a random database, runs the real migrations and drops the database after its assertions. Missing fixture configuration fails the tests; these tests never silently skip.
 
