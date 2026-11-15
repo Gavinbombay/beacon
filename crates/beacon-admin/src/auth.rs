@@ -229,13 +229,14 @@ mod tests {
 
     #[tokio::test]
     async fn arbitrary_names_cannot_expand_source_state() {
-        let passphrase = uuid::Uuid::new_v4().to_string();
-        let mgr = AuthManager::new(AuthConfig {
+        let config = AuthConfig {
             enabled: true,
             username: "admin".into(),
-            password: passphrase.clone(),
+            password: uuid::Uuid::new_v4().to_string(),
             ..Default::default()
-        });
+        };
+        let passphrase = config.password.clone();
+        let mgr = AuthManager::new(config);
         for _ in 0..super::ATTEMPTS_PER_WINDOW {
             let name = uuid::Uuid::new_v4().to_string();
             assert!(mgr.login(&name, "[R]", peer()).await.is_none());

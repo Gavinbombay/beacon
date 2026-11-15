@@ -543,13 +543,14 @@ async fn pg_known_admin_failures_from_one_peer_do_not_lock_out_another() {
     use axum::extract::ConnectInfo;
     use std::net::SocketAddr;
     let (mut state, control, db) = fixture().await;
-    let passphrase = Uuid::new_v4().to_string();
-    state.auth = Arc::new(AuthManager::new(beacon_core::AuthConfig {
+    let config = beacon_core::AuthConfig {
         enabled: true,
         username: "admin".into(),
-        password: passphrase.clone(),
+        password: Uuid::new_v4().to_string(),
         ..Default::default()
-    }));
+    };
+    let passphrase = config.password.clone();
+    state.auth = Arc::new(AuthManager::new(config));
     let mut servers = Vec::new();
     let mut urls = Vec::new();
     for peer in ["192.0.2.1:1000", "192.0.2.2:1000"] {
