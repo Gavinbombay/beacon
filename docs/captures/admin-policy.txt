@@ -1,0 +1,5 @@
+running 3 tests
+test auth::tests::ff3_forwarded_budget_requires_a_trusted_transport_peer ... ok
+test pg_regressions::pg_ff3_legacy_alias_startup_fails_closed_before_routing ... ok
+test pg_regressions::pg_ff3_shared_proxy_clients_have_independent_budgets ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 29 filtered out; finished in 2.41s

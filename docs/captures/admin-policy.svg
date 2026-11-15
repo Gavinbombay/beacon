@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="910" height="234" viewBox="0 0 910 234" role="img" aria-label="Terminal capture of actual test output">
+<rect width="910" height="234" rx="18" fill="#101c2b"/>
+<circle cx="26" cy="27" r="5" fill="#ffb86b"/>
+<circle cx="46" cy="27" r="5" fill="#5bd5cf"/>
+<text x="68" y="33" fill="#d7e3f0" font-family="monospace" font-size="15">Beacon / terminal capture</text>
+<text x="26" y="80" fill="#d7e3f0" font-family="monospace" font-size="14">running 3 tests</text>
+<text x="26" y="106" fill="#d7e3f0" font-family="monospace" font-size="14">test auth::tests::ff3_forwarded_budget_requires_a_trusted_transport_peer ... ok</text>
+<text x="26" y="132" fill="#d7e3f0" font-family="monospace" font-size="14">test pg_regressions::pg_ff3_legacy_alias_startup_fails_closed_before_routing ... ok</text>
+<text x="26" y="158" fill="#d7e3f0" font-family="monospace" font-size="14">test pg_regressions::pg_ff3_shared_proxy_clients_have_independent_budgets ... ok</text>
+<text x="26" y="184" fill="#d7e3f0" font-family="monospace" font-size="14">test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 29 filtered out; finished in 2.41s</text>
+</svg>

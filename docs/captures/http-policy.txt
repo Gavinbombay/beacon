@@ -1,0 +1,6 @@
+running 4 tests
+test tests::ff3_tls_scheme_and_ipv6_are_listener_derived ... ok
+test tests::ff3_websocket_forwarded_identity_policy ... ok
+test tests::ff3_http_forwarded_identity_policy ... ok
+test tests::ff3_websocket_origin_policy_precedes_upstream_contact ... ok
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.11s
