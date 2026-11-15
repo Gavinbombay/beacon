@@ -227,7 +227,7 @@ impl TlsManager {
 
         let (cert_pem, key_pem) = self.generate_self_signed_pem(domains)?;
         tokio::fs::write(cert_pem_path, cert_pem).await?;
-        Self::write_private_file(key_pem_path, &key_pem).await?;
+        Self::write_private_file(key_pem_path, key_pem.as_bytes()).await?;
         tracing::warn!(
             "Generated self-signed TLS cert at {} and {}",
             cert_pem_path,
@@ -251,7 +251,7 @@ impl TlsManager {
     }
 
     #[cfg(unix)]
-    async fn write_private_file(path: &str, private_pem: &str) -> Result<()> {
+    async fn write_private_file(path: &str, private_pem: &[u8]) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         use tokio::io::AsyncWriteExt;
         let mut options = tokio::fs::OpenOptions::new();
@@ -259,12 +259,13 @@ impl TlsManager {
         let mut file = options.open(path).await?;
         file.set_permissions(std::fs::Permissions::from_mode(0o600))
             .await?;
-        file.write_all(private_pem.as_bytes()).await?;
+        file.write_all(private_pem).await?;
+        file.flush().await?;
         Ok(())
     }
 
     #[cfg(not(unix))]
-    async fn write_private_file(path: &str, private_pem: &str) -> Result<()> {
+    async fn write_private_file(path: &str, private_pem: &[u8]) -> Result<()> {
         tokio::fs::write(path, private_pem).await?;
         Ok(())
     }
@@ -342,7 +343,10 @@ impl TlsManager {
 
         ensure_parent_dirs(&tls.cert_pem_path, &tls.key_pem_path).await?;
         tokio::fs::copy(crt, &tls.cert_pem_path).await?;
-        tokio::fs::copy(key, &tls.key_pem_path).await?;
+        // Read before opening the destination, including when transport output
+        // already uses that path. Do not inherit the transport file's mode.
+        let private_pem = tokio::fs::read(key).await?;
+        Self::write_private_file(&tls.key_pem_path, &private_pem).await?;
         tracing::info!(
             "ACME certificate ready at {} and {}",
             tls.cert_pem_path,
@@ -431,6 +435,71 @@ mod tests {
             *self.domains.lock().unwrap() = domains.to_vec();
             Box::pin(async move { Ok((self.cert.clone(), self.key.clone())) })
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn acme_install_and_renewal_restrict_private_file_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let root =
+            std::env::temp_dir().join(format!("beacon-acme-permissions-{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let fixture = Fixture {
+            cert: root.join("source.crt"),
+            key: root.join("source.pem"),
+            domains: Mutex::new(Vec::new()),
+        };
+        let tls = TlsConfig {
+            acme_email: "ops@example.invalid".into(),
+            cert_pem_path: root.join("installed/cert.pem").to_string_lossy().into(),
+            key_pem_path: root.join("installed/private.pem").to_string_lossy().into(),
+            ..TlsConfig::default()
+        };
+        tokio::fs::write(&fixture.cert, "certificate fixture")
+            .await
+            .unwrap();
+        let manager = TlsManager::new();
+        let dns = DnsConfig {
+            provider: String::new(),
+            api_key: String::new(),
+            secret_key: String::new(),
+            default_ip: "192.0.2.1".into(),
+        };
+        for renewal in [false, true] {
+            // Runtime-random material, including a non-UTF8 byte, checks that
+            // installation preserves bytes without retaining sensitive fixtures.
+            let mut material = uuid::Uuid::new_v4().as_bytes().to_vec();
+            material.push(0xff);
+            tokio::fs::write(&fixture.key, &material).await.unwrap();
+            tokio::fs::set_permissions(&fixture.key, std::fs::Permissions::from_mode(0o666))
+                .await
+                .unwrap();
+            if renewal {
+                tokio::fs::set_permissions(
+                    &tls.key_pem_path,
+                    std::fs::Permissions::from_mode(0o666),
+                )
+                .await
+                .unwrap();
+            }
+            manager
+                .ensure_acme(&tls, &dns, &["example.test".into()], &fixture)
+                .await
+                .unwrap();
+            let mode = tokio::fs::metadata(&tls.key_pem_path)
+                .await
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(
+                mode, 0o600,
+                "ACME installation must enforce owner-only mode"
+            );
+            // Boolean assertion avoids printing generated material on failure.
+            assert!(tokio::fs::read(&tls.key_pem_path).await.unwrap() == material);
+        }
+        tokio::fs::remove_dir_all(root).await.unwrap();
     }
 
     #[tokio::test]

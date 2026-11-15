@@ -47,14 +47,16 @@ impl AuthManager {
         if self.username.trim().is_empty() || self.passphrase.trim().is_empty() {
             return None;
         }
-        let permit = self.verification_slots.clone().try_acquire_owned().ok()?;
         if self.is_rate_limited(username).await {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             return None;
         }
 
+        // Admission covers verification, never fixed rejection delays.
+        let permit = self.verification_slots.clone().try_acquire_owned().ok()?;
         let ok_user = username == self.username;
         let ok_pass = if !ok_user {
+            drop(permit);
             false
         } else if self.passphrase.starts_with("$2") {
             let supplied = password.to_owned();
@@ -65,7 +67,9 @@ impl AuthManager {
             })
             .await
         } else {
-            self.passphrase == password
+            let matches = self.passphrase == password;
+            drop(permit);
+            matches
         };
         if !(ok_user && ok_pass) {
             self.register_failed_attempt(username).await;
@@ -237,6 +241,59 @@ mod tests {
             .await
             .unwrap();
         assert!(mgr.login("admin", "").await.is_none());
+    }
+
+    // Poll both rejection futures into their fixed delays without waiting for
+    // those delays to expire. No scheduling or bcrypt timing assumption is used.
+    async fn rejection_delays_leave_verification_capacity(known_name: bool, blocked: bool) {
+        use std::{future::Future, task::Poll};
+        let passphrase = uuid::Uuid::new_v4().to_string();
+        let mgr = AuthManager::new(AuthConfig {
+            enabled: true,
+            username: "admin".into(),
+            password: passphrase.clone(),
+            ..Default::default()
+        });
+        let name = if known_name { "admin" } else { "unknown" };
+        if blocked {
+            for _ in 0..5 {
+                mgr.register_failed_attempt(name).await;
+            }
+        }
+        let mut first = Box::pin(mgr.login(name, ""));
+        let mut second = Box::pin(mgr.login(name, ""));
+        std::future::poll_fn(|cx| {
+            assert!(first.as_mut().poll(cx).is_pending());
+            assert!(second.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        assert_eq!(mgr.verification_slots.available_permits(), 2);
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            mgr.login("admin", &passphrase)
+        )
+        .await
+        .unwrap()
+        .is_some());
+        // Rejection and rate-limit behavior is preserved after admission is freed.
+        assert!(first.await.is_none());
+        assert!(second.await.is_none());
+    }
+
+    #[tokio::test]
+    async fn anonymous_rejection_delays_do_not_starve_administrator_login() {
+        rejection_delays_leave_verification_capacity(false, false).await;
+    }
+
+    #[tokio::test]
+    async fn blocked_anonymous_delays_do_not_starve_administrator_login() {
+        rejection_delays_leave_verification_capacity(false, true).await;
+    }
+
+    #[tokio::test]
+    async fn failed_plaintext_delays_release_verification_capacity() {
+        rejection_delays_leave_verification_capacity(true, false).await;
     }
 
     #[tokio::test]

@@ -883,7 +883,10 @@ mod tests {
             removal.abort();
             let _ = removal.await;
         }
-        assert!(completed, "lane removal waited for a task under the map lock");
+        assert!(
+            completed,
+            "lane removal waited for a task under the map lock"
+        );
         assert!(mgr.forwards().await.is_empty());
     }
 
