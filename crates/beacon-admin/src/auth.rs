@@ -247,13 +247,14 @@ mod tests {
     // those delays to expire. No scheduling or bcrypt timing assumption is used.
     async fn rejection_delays_leave_verification_capacity(known_name: bool, blocked: bool) {
         use std::{future::Future, task::Poll};
-        let passphrase = uuid::Uuid::new_v4().to_string();
-        let mgr = AuthManager::new(AuthConfig {
+        let config = AuthConfig {
             enabled: true,
             username: "admin".into(),
-            password: passphrase.clone(),
+            password: uuid::Uuid::new_v4().to_string(),
             ..Default::default()
-        });
+        };
+        let passphrase = config.password.clone();
+        let mgr = AuthManager::new(config);
         let name = if known_name { "admin" } else { "unknown" };
         if blocked {
             for _ in 0..5 {
