@@ -18,4 +18,3 @@ Set BEACON_TEST_DATABASE_URL for a disposable PostgreSQL cluster, and BEACON_TES
 
 The generator uses only the Python standard library, reads committed text and writes deterministic SVG. Re-running it without modifying captures must reproduce the image bytes. To refresh captures after a code change, run the recorded commands and select their actual result lines again. The job's retained test evidence records the full tests and pre-fix replay separately.
 
-The hero and mark are Quill web illustrations supplied for Beacon. They are not screenshots or evidence of a deployed service. Their original staged files were not modified.

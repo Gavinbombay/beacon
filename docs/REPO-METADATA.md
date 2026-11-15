@@ -16,6 +16,6 @@ Social preview: `docs/social-preview.png`, 1280x640 PNG, under 1 MB, with no met
 
 Author and copyright holder: GavinBombay and Beacon contributors, as recorded in NOTICE. Apache License 2.0; LICENSE and NOTICE remain authoritative.
 
-Assets: the hero and mark remain unchanged Quill web re-encodes, rather than metadata-bearing originals. The social preview fits that same supplied mark onto a dark 1280x640 canvas. These are illustrations. Terminal screenshots are SVG renderings of actual sandbox test output, with committed capture text and a reproducible generator under docs/tools/.
+Assets: the social preview places the Beacon mark on a dark 1280x640 canvas. Terminal screenshots are SVG renderings of actual sandbox test output, with committed capture text and a reproducible generator under docs/tools/.
 
 Badges: local static SVGs under docs/badges/; the security and build badges refer to audited/tested FF3 commit cff28dd31c5620390d6218cfa6448da0f5d07872 (zero open findings; 199 passed, 0 failed). No live continuous integration badge or workflow is implied.

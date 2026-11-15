@@ -8,13 +8,13 @@
 [![FF3 build: 199 passed, 0 failed at cff28dd31c56](docs/badges/build.svg)](#verified-ff3-results)
 [![Security audit: PASS, zero open findings at cff28dd31c56](docs/badges/security-audit.svg)](AUDIT.md)
 
-![A lighthouse casting gold beams over the coast, Beacon illustration](docs/assets/beacon-hero.jpg)
+![A lighthouse casting gold beams over the coast](docs/assets/beacon-hero.jpg)
 
 **A Rust edge server where sites are database rows.** Route hosts and paths to reverse proxies, static files, redirects or WebSockets. Manage them through an administrative API backed by PostgreSQL, with DNS and TLS integrations when configured.
 
 [Architecture](#architecture) · [Quickstart](#quickstart) · [Deploying behind a proxy](#deploying-behind-a-proxy) · [Security notes](docs/SECURITY.md)
 
-Beacon grew out of the difficulty of letting automated tools edit one shared server configuration. Give each site a row and a handler instead: change the site you mean, then publish a route snapshot. The lighthouse artwork and the line "Build your own, so you can break your own" come from the original Beacon story. Deployment totals are intentionally not product guarantees.
+Beacon grew out of the difficulty of letting automated tools edit one shared server configuration. Give each site a row and a handler instead: change the site you mean, then publish a route snapshot. Deployment totals are intentionally not product guarantees.
 
 Status: early open-source release (v0.2). APIs and configuration may change. Built for operators who want to understand their edge: make the front door a program you can read, test and run yourself.
 
@@ -48,8 +48,6 @@ flowchart LR
 Public TLS and administrative HTTP are separate listeners. The admin API coordinates site writes and routing. DNS automation and certificate issuance depend on operator configuration and available provider tooling.
 
 ## Screenshots
-
-These are **terminal captures**, generated from actual sandbox regression output, not mock dashboards. The lighthouse images are illustrations.
 
 ![Terminal capture of HTTP and WebSocket policy tests](docs/captures/http-policy.svg)
 
